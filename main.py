@@ -9,7 +9,7 @@ class BlurDetectorApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Детектор размытых областей")
-        self.root.geometry("900x700")
+        self.root.geometry("1200x800")
         
         # Панель управления
         self.control_frame = tk.Frame(root)
@@ -29,29 +29,29 @@ class BlurDetectorApp:
         self.btn_load.pack(side=tk.LEFT, padx=5)
         
         # Настройки параметров
-        tk.Label(self.control_frame, text="Порог дисперсии:").pack(side=tk.LEFT, padx=5)
-        self.threshold_var = tk.DoubleVar(value=100.0)
+        tk.Label(self.control_frame, text="Порог:").pack(side=tk.LEFT, padx=5)
+        self.threshold_var = tk.DoubleVar(value=50.0)
         self.threshold_scale = tk.Scale(
             self.control_frame, 
             from_=10, 
-            to=500, 
+            to=200, 
             orient=tk.HORIZONTAL,
             variable=self.threshold_var,
-            resolution=10
+            resolution=5
         )
         self.threshold_scale.pack(side=tk.LEFT, padx=5)
         
-        tk.Label(self.control_frame, text="Размер блока:").pack(side=tk.LEFT, padx=5)
-        self.block_size_var = tk.IntVar(value=20)
-        self.block_scale = tk.Scale(
+        tk.Label(self.control_frame, text="Размер ядра:").pack(side=tk.LEFT, padx=5)
+        self.kernel_size_var = tk.IntVar(value=15)
+        self.kernel_scale = tk.Scale(
             self.control_frame,
             from_=5,
-            to=50,
+            to=51,
             orient=tk.HORIZONTAL,
-            variable=self.block_size_var,
-            resolution=1
+            variable=self.kernel_size_var,
+            resolution=2
         )
-        self.block_scale.pack(side=tk.LEFT, padx=5)
+        self.kernel_scale.pack(side=tk.LEFT, padx=5)
         
         # Кнопка обработки
         self.btn_process = tk.Button(
@@ -110,6 +110,10 @@ class BlurDetectorApp:
         canvas_width = self.canvas.winfo_width()
         canvas_height = self.canvas.winfo_height()
         
+        if canvas_width < 100 or canvas_height < 100:
+            canvas_width = 800
+            canvas_height = 600
+        
         # Масштабирование изображения под canvas
         h, w = image_rgb.shape[:2]
         scale = min(canvas_width / w, canvas_height / h)
@@ -138,78 +142,93 @@ class BlurDetectorApp:
             
         # Параметры
         threshold = self.threshold_var.get()
-        block_size = self.block_size_var.get()
+        kernel_size = self.kernel_size_var.get()
         
         # Перевод в градации серого
         gray = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2GRAY)
+        gray_float = gray.astype(np.float64)
         
         # Применение фильтра Лапласиана
-        laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+        laplacian = cv2.Laplacian(gray_float, cv2.CV_64F)
         
-        # Вычисление дисперсии в локальных блоках
-        h, w = gray.shape
-        blur_map = np.zeros((h, w), dtype=np.float64)
+        # Вычисление локальной дисперсии с помощью скользящего окна
+        # Используем размытие для получения среднего значения
+        kernel = np.ones((kernel_size, kernel_size), np.float64) / (kernel_size * kernel_size)
         
-        for y in range(0, h - block_size, block_size):
-            for x in range(0, w - block_size, block_size):
-                block = laplacian[y:y+block_size, x:x+block_size]
-                variance = np.var(block)
-                blur_map[y:y+block_size, x:x+block_size] = variance
+        # Среднее значение квадрата Лапласиана
+        laplacian_sq = laplacian ** 2
+        mean_sq = cv2.filter2D(laplacian_sq, -1, kernel)
         
-        # Нормализация карты размытости
-        blur_map_normalized = cv2.normalize(blur_map, None, 0, 255, cv2.NORM_MINMAX)
-        blur_map_normalized = blur_map_normalized.astype(np.uint8)
+        # Квадрат среднего значения Лапласиана
+        mean_lap = cv2.filter2D(laplacian, -1, kernel)
+        mean_lap_sq = mean_lap ** 2
         
-        # Пороговая бинаризация (инвертированная: низкая дисперсия = размытие)
+        # Дисперсия = E[X²] - (E[X])²
+        variance_map = mean_sq - mean_lap_sq
+        
+        # Обеспечиваем неотрицательность
+        variance_map = np.maximum(variance_map, 0)
+        
+        # Нормализация карты дисперсии
+        variance_normalized = cv2.normalize(variance_map, None, 0, 255, cv2.NORM_MINMAX)
+        variance_normalized = variance_normalized.astype(np.uint8)
+        
+        # Пороговая бинаризация (низкая дисперсия = размытие)
         _, binary_map = cv2.threshold(
-            blur_map_normalized, 
+            variance_normalized, 
             threshold, 
             255, 
             cv2.THRESH_BINARY_INV
         )
         
         # Морфологические операции для очистки
-        kernel = np.ones((5, 5), np.uint8)
+        morph_kernel = np.ones((5, 5), np.uint8)
         
         # Закрытие для заполнения мелких отверстий
-        binary_map = cv2.morphologyEx(binary_map, cv2.MORPH_CLOSE, kernel, iterations=2)
+        binary_map = cv2.morphologyEx(binary_map, cv2.MORPH_CLOSE, morph_kernel, iterations=2)
         
         # Открытие для удаления мелких шумов
-        binary_map = cv2.morphologyEx(binary_map, cv2.MORPH_OPEN, kernel, iterations=1)
+        binary_map = cv2.morphologyEx(binary_map, cv2.MORPH_OPEN, morph_kernel, iterations=1)
         
-        # Размытие границ для более плавного перехода
-        binary_map = cv2.GaussianBlur(binary_map, (15, 15), 0)
+        # Размытие для создания плавных границ
+        binary_map = cv2.GaussianBlur(binary_map, (21, 21), 0)
         
-        # Поиск контуров размытых областей
+        # Создание маски размытых областей
+        h, w = gray.shape
+        blur_mask = (binary_map > 127).astype(np.uint8) * 255
+        
+        # Наложение полупрозрачного красного цвета на размытые области
+        result = self.original_image.copy()
+        
+        # Создаем красный оверлей
+        red_overlay = np.zeros_like(result)
+        red_overlay[:, :] = [0, 0, 255]  # BGR
+        
+        # Применяем маску с прозрачностью
+        mask_bool = blur_mask > 0
+        alpha = 0.5
+        
+        for c in range(3):
+            result[mask_bool, c] = (
+                alpha * red_overlay[mask_bool, c] + 
+                (1 - alpha) * result[mask_bool, c]
+            ).astype(np.uint8)
+        
+        # Поиск и отрисовка контуров
         contours, _ = cv2.findContours(
             binary_map, 
             cv2.RETR_EXTERNAL, 
             cv2.CHAIN_APPROX_SIMPLE
         )
         
-        # Создание маски размытых областей
-        blur_mask = np.zeros((h, w), dtype=np.uint8)
-        cv2.drawContours(blur_mask, contours, -1, 255, -1)
-        
-        # Наложение полупрозрачного красного цвета на размытые области
-        result = self.original_image.copy()
-        overlay = result.copy()
-        
-        # Создание красного слоя
-        overlay[blur_mask > 127] = [0, 0, 255]  # BGR формат
-        
-        # Альфа-смешивание с прозрачностью 50%
-        alpha = 0.5
-        result = cv2.addWeighted(overlay, alpha, result, 1 - alpha, 0)
-        
-        # Отрисовка контуров для наглядности
+        # Отрисовка контуров зелёным цветом
         cv2.drawContours(result, contours, -1, (0, 255, 0), 2)
         
         self.processed_image = result
         self.display_image(result)
         
         # Вывод статистики
-        blur_percentage = (np.sum(blur_mask > 127) / (h * w)) * 100
+        blur_percentage = (np.sum(mask_bool) / (h * w)) * 100
         messagebox.showinfo(
             "Результат обработки",
             f"Найдено {len(contours)} размытых областей\n"
