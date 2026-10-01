@@ -89,6 +89,12 @@ TOOLTIPS = {
         "Помогает от мусора, но может пропустить сильно размытые семена."
     ),
     "save_only_focused": "При сохранении сохранять только зелёные объекты.",
+    "mm_per_px": (
+        "Размер одного пикселя в миллиметрах (мм/px).\n"
+        "Например, если 10 мм на фото = 400 px, то 10 / 400 = 0.025.\n"
+        "Можно вводить с точкой или запятой.\n"
+        "Пусто — замеры считаются в пикселях."
+    ),
 }
 
 
@@ -614,6 +620,14 @@ def process_image(img_bgr, params):
         if filter_edge and status != "focused":
             continue
 
+        # Замер: минимальный повёрнутый прямоугольник вокруг контура.
+        # Большая сторона — длина, меньшая — ширина (в пикселях).
+        rect = cv2.minAreaRect(cand["contour"])
+        side_a, side_b = rect[1]
+        cand["rect"] = rect
+        cand["length_px"] = float(max(side_a, side_b))
+        cand["width_px"] = float(min(side_a, side_b))
+
         cand["edge_width"] = edge_width
         cand["status"] = status
         items.append(cand)
@@ -621,6 +635,7 @@ def process_image(img_bgr, params):
     items.sort(key=lambda it: (it["bbox"][1], it["bbox"][0]))
 
     annotated = img_bgr.copy()
+    mm_per_px = params.get("mm_per_px")
 
     for i, item in enumerate(items, 1):
         x, y, bw, bh = item["bbox"]
@@ -629,9 +644,18 @@ def process_image(img_bgr, params):
         cv2.drawContours(annotated, [item["contour"]], -1, color, 1, lineType=cv2.LINE_AA)
         cv2.rectangle(annotated, (x, y), (x + bw, y + bh), color, 2)
 
+        # Повёрнутый прямоугольник, по которому считаются длина и ширина
+        box = cv2.boxPoints(item["rect"]).astype(np.int32)
+        cv2.polylines(annotated, [box], True, (255, 0, 255), 1, cv2.LINE_AA)
+
         label = f"{i}"
         if item["edge_width"] is not None:
             label += f" {item['edge_width']:.1f}px"
+
+        if mm_per_px:
+            label += f" | {item['length_px'] * mm_per_px:.2f}x{item['width_px'] * mm_per_px:.2f}mm"
+        else:
+            label += f" | {item['length_px']:.0f}x{item['width_px']:.0f}px"
 
         ty = y - 6 if y - 20 > 0 else y + bh + 16
         cv2.putText(
@@ -650,6 +674,52 @@ def process_image(img_bgr, params):
         "annotated": annotated,
         "mask": mask,
     }
+
+
+# ------------------------------------------------------------
+# Статистика размеров
+# ------------------------------------------------------------
+
+def compute_size_stats(items, mm_per_px=None):
+    """
+    Считает мин / среднее / макс по длине и ширине семян.
+    Если mm_per_px не задан — значения остаются в пикселях.
+    """
+    if not items:
+        return None
+
+    k = float(mm_per_px) if mm_per_px else 1.0
+
+    lengths = np.array([it["length_px"] for it in items], dtype=np.float64) * k
+    widths = np.array([it["width_px"] for it in items], dtype=np.float64) * k
+
+    return {
+        "count": len(items),
+        "unit": "мм" if mm_per_px else "px",
+        "length": (float(lengths.min()), float(lengths.mean()), float(lengths.max())),
+        "width": (float(widths.min()), float(widths.mean()), float(widths.max())),
+    }
+
+
+def format_size_stats(stats):
+    if stats is None:
+        return "Нет данных"
+
+    unit = stats["unit"]
+    decimals = 2 if unit == "мм" else 1
+
+    def line(title, values):
+        mn, avg, mx = values
+        return (
+            f"{title}, {unit}:  "
+            f"мин {mn:.{decimals}f} / ср {avg:.{decimals}f} / макс {mx:.{decimals}f}"
+        )
+
+    return "\n".join([
+        f"Семян: {stats['count']}",
+        line("Длина", stats["length"]),
+        line("Ширина", stats["width"]),
+    ])
 
 
 # ------------------------------------------------------------
@@ -721,6 +791,11 @@ class FlaxSeedApp:
             self.param_lows[key] = low
             self.param_highs[key] = high
             self.param_steps[key] = step
+
+        # Масштаб (мм на пиксель) и текст статистики — отдельно от self.vars,
+        # потому что mm/px вводится вручную и разбирается в get_params().
+        self.mm_per_px_var = tk.StringVar(value="")
+        self.stats_var = tk.StringVar(value="—")
 
         self.vars["thresh_mode"] = tk.StringVar(value="Otsu")
         self.vars["estimate_edge"] = tk.BooleanVar(value=True)
@@ -837,6 +912,22 @@ class FlaxSeedApp:
     def _build_param_panel(self):
         pf = self.param_frame
 
+        # --- Масштаб и статистика размеров ---
+        ttk.Label(pf, text="Масштаб, мм/px:").pack(anchor="w", padx=4, pady=(4, 0))
+
+        mm_entry = ttk.Entry(pf, textvariable=self.mm_per_px_var, width=18)
+        mm_entry.pack(fill=tk.X, padx=4)
+        ToolTip(mm_entry, TOOLTIPS.get("mm_per_px", ""))
+
+        ttk.Label(pf, text="Статистика семян:").pack(anchor="w", padx=4, pady=(6, 0))
+        ttk.Label(
+            pf,
+            textvariable=self.stats_var,
+            justify="left"
+        ).pack(anchor="w", padx=4)
+
+        ttk.Separator(pf, orient="horizontal").pack(fill="x", pady=4)
+
         ttk.Label(pf, text="Порог:").pack(anchor="w", padx=4, pady=(4, 0))
 
         combo = ttk.Combobox(
@@ -948,7 +1039,28 @@ class FlaxSeedApp:
         if float(params["blur_edge_width"]) <= float(params["max_edge_width"]):
             params["blur_edge_width"] = float(params["max_edge_width"]) + 0.1
 
+        params["mm_per_px"] = self._parse_mm_per_px()
+
         return params
+
+    def _parse_mm_per_px(self):
+        """
+        Возвращает мм/px как float или None, если поле пустое.
+        Принимает и точку, и запятую.
+        """
+        text = self.mm_per_px_var.get().strip().replace(",", ".")
+        if not text:
+            return None
+
+        try:
+            value = float(text)
+        except ValueError:
+            raise ValueError("Масштаб мм/px должен быть числом, например 0.025")
+
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError("Масштаб мм/px должен быть положительным числом, например 0.025")
+
+        return value
 
     # ------------------------------------------------------------
     # View / zoom
@@ -1179,6 +1291,7 @@ class FlaxSeedApp:
         self.original_bgr = img
         self.result_bgr = None
         self.seed_items = []
+        self.stats_var.set("—")
         self.current_view = "original"
         self.fit_mode = "width"
 
@@ -1202,6 +1315,9 @@ class FlaxSeedApp:
             self.result_bgr = result["annotated"]
             self.seed_items = result["items"]
             self.current_view = "result"
+
+            stats = compute_size_stats(self.seed_items, params["mm_per_px"])
+            self.stats_var.set(format_size_stats(stats))
 
             self.canvas.after_idle(self._refresh_view_after_change)
 
