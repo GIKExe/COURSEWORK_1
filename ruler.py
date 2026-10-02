@@ -185,7 +185,7 @@ class RulerCalibrator:
         if px_per_mm is not None:
             refined = self._refine_scale(distances, px_per_mm)
             if refined is not None:
-                px_per_mm = refined
+                px_per_mm = refined * 2
         else:
             px_per_mm = self._dominant_distance(distances)  # fallback
 
