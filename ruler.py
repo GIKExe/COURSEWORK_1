@@ -279,7 +279,12 @@ class RulerCalibrator:
 # ======================================================================
 
 def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else 'ruler_photo.jpg'
+    if len(sys.argv) > 1:
+        path = sys.argv[1] 
+    else:
+        print('Введите путь до изображения в аргументах')
+        sys.exit(0)
+        
     if not os.path.exists(path):
         print(f"Файл не найден: {path}")
         sys.exit(1)
