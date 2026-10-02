@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Калибровка mm/px по фотографии линейки.
-Подход: контурный анализ штрихов, касающихся края линейки.
+Контурный анализ штрихов + якорь по сантиметровым штрихам.
 """
 
 import cv2
@@ -95,17 +95,15 @@ class RulerCalibrator:
             cv2.THRESH_BINARY_INV, blockSize=bs, C=8
         )
 
-        # Слабое сужение маски (срезу кромку, но сохраняем длину штрихов)
         kern_e = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
         mask_e = cv2.erode(mask, kern_e, iterations=1)
         tick_bin = cv2.bitwise_and(adaptive, mask_e)
 
-        # Вертикальное закрытие: сшивает прерывистые штрихи,
-        # точки/мусор при этом не вырастают
+        # Вертикальное закрытие: сшивает прерывистые штрихи
         kern_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 9))
         tick_bin = cv2.morphologyEx(tick_bin, cv2.MORPH_CLOSE, kern_v)
 
-        # Границы линейки для каждого столбца (учитывает остаточный наклон)
+        # Границы линейки поколоночно (учитывает остаточный наклон)
         mb = mask_e > 128
         col_any = mb.any(axis=0)
         top_edge = np.where(col_any, mb.argmax(axis=0), -1)
@@ -114,13 +112,12 @@ class RulerCalibrator:
         contours, _ = cv2.findContours(tick_bin, cv2.RETR_EXTERNAL,
                                        cv2.CHAIN_APPROX_SIMPLE)
 
-        # Геометрические пороги
-        min_area = max(5.0, ch * 0.05)     # тонкие штрихи проходят
+        min_area = max(5.0, ch * 0.05)
         max_area = ch * cw * 0.005
         min_h = ch * 0.05
         max_h = ch * 0.75
         max_w = max(6, int(cw * 0.004))
-        tol = max(3, int(ch * 0.04))       # допуск касания края
+        tol = max(3, int(ch * 0.04))
 
         ticks = []
         for cnt in contours:
@@ -133,8 +130,7 @@ class RulerCalibrator:
             if bh / max(bw, 1) < 2.5:
                 continue
 
-            # ГЛАВНЫЙ ФИЛЬТР: штрих обязан касаться края линейки.
-            # Цифры и надписи лежат в середине → отбрасываются.
+            # Штрих обязан касаться края линейки (цифры/надписи — нет)
             cxi = min(max(bx + bw // 2, 0), cw - 1)
             te, be = top_edge[cxi], bot_edge[cxi]
             if te < 0:
@@ -162,7 +158,6 @@ class RulerCalibrator:
         if len(edge_ticks) < 8:
             edge_ticks = ticks
 
-        # Сортировка + дедупликация (зазор меньше 0.5 мм шага)
         edge_ticks.sort(key=lambda t: t['cx'])
         min_gap = max(2, round(cw * 0.0006))
         uniq = [edge_ticks[0]]
@@ -175,56 +170,105 @@ class RulerCalibrator:
         if len(uniq) < 8:
             raise ValueError(f"После дедупликации мало штрихов: {len(uniq)}")
 
-        # Расстояния между соседними штрихами → мода = 1 мм
         x_pos = np.array([t['cx'] for t in uniq], dtype=np.float64)
+        heights = np.array([t['bh'] for t in uniq], dtype=np.float64)
         distances = np.diff(x_pos)
-        d_1mm = self._dominant_distance(distances)
-        mm_per_px = 1.0 / d_1mm
+
+        # --- Шаг 1: грубый масштаб по сантиметровым штрихам ---
+        # Самые длинные штрихи = см, стоят через 10 мм.
+        # Это снимает неоднозначность "решётка 0.5 мм или 1 мм".
+        px_per_mm = self._cm_scale(x_pos, heights)
+        n_cm = int((heights >= np.percentile(heights, 88)).sum()) \
+            if px_per_mm is not None else 0
+
+        # --- Шаг 2: уточнение по всем штрихам (гипотезы 1 мм / 0.5 мм) ---
+        if px_per_mm is not None:
+            refined = self._refine_scale(distances, px_per_mm)
+            if refined is not None:
+                px_per_mm = refined
+        else:
+            px_per_mm = self._dominant_distance(distances)  # fallback
+
+        mm_per_px = 1.0 / px_per_mm
 
         if debug:
-            self._save_debug(tick_bin, uniq, d_1mm, mm_per_px)
+            self._save_debug(tick_bin, uniq, heights, mm_per_px, px_per_mm)
 
         return mm_per_px
 
     # ------------------------------------------------------------------
-    #  Кластеризация расстояний
+    #  Оценка масштаба
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _cm_scale(x_pos: np.ndarray, heights: np.ndarray):
+        """Грубый px_per_mm по самым длинным (сантиметровым) штрихам."""
+        if len(x_pos) < 10:
+            return None
+        thr = np.percentile(heights, 88)
+        xs = x_pos[heights >= thr]
+        if len(xs) < 5:
+            return None
+        d = np.diff(xs)
+        med = np.median(d)
+        sel = d[np.abs(d - med) <= 0.15 * med]
+        if len(sel) < 4:
+            sel = d[np.abs(d - med) <= 0.30 * med]
+        if len(sel) < 4:
+            return None
+        return float(np.mean(sel)) / 10.0
+
+    @staticmethod
+    def _refine_scale(distances: np.ndarray, px_per_mm: float):
+        """
+        Уточнение: выбираем гипотезу решётки (1 мм или 0.5 мм),
+        которая объясняет больше соседних расстояний, и усредняем её.
+        """
+        best_n, best_val = 0, None
+        for k in (1.0, 0.5):
+            target = px_per_mm * k
+            sel = distances[np.abs(distances - target) <= 0.10 * target]
+            if len(sel) >= 15 and len(sel) > best_n:
+                best_n = len(sel)
+                best_val = float(np.mean(sel)) / k
+        return best_val
+
+    @staticmethod
     def _dominant_distance(distances: np.ndarray) -> float:
+        """Fallback: мода соседних расстояний (если см-штрихи не найдены)."""
         d = np.asarray(distances, dtype=np.float64)
-
-        q1, q3 = np.percentile(d, [20, 80])
-        iqr = q3 - q1
-        clean = d[(d >= q1 - 2 * iqr) & (d <= q3 + 2 * iqr)]
-        if len(clean) < 3:
-            clean = d
-
-        n_bins = max(15, min(60, len(clean)))
-        counts, edges = np.histogram(clean, bins=n_bins)
-        peak_bin = int(np.argmax(counts))
-        d_mode = (edges[peak_bin] + edges[peak_bin + 1]) / 2.0
-
-        tol = d_mode * 0.20
-        cluster = clean[np.abs(clean - d_mode) <= tol]
-        if len(cluster) < 2:
-            return float(np.median(clean))
-        return float(np.mean(cluster))
+        med = np.median(d)
+        keep = d[(d > 0.4 * med) & (d < 1.6 * med)]
+        if len(keep) < 3:
+            keep = d
+        counts, edges = np.histogram(keep, bins=40)
+        peak = int(np.argmax(counts))
+        d_mode = (edges[peak] + edges[peak + 1]) / 2.0
+        sel = keep[np.abs(keep - d_mode) <= 0.10 * d_mode]
+        if len(sel) < 2:
+            return float(med)
+        return float(np.mean(sel))
 
     # ------------------------------------------------------------------
     #  Отладка
     # ------------------------------------------------------------------
 
-    def _save_debug(self, tick_bin, ticks, d_1mm, mm_per_px):
+    def _save_debug(self, tick_bin, ticks, heights, mm_per_px, px_per_mm):
+        thr = np.percentile(heights, 88)
         vis = cv2.cvtColor(self._crop, cv2.COLOR_GRAY2BGR)
-        for t in ticks:
+        n_cm = 0
+        for t, h in zip(ticks, heights):
             bx, by, bw, bh = t['bx'], t['by'], t['bw'], t['bh']
-            cv2.rectangle(vis, (bx, by), (bx + bw, by + bh), (0, 255, 0), 1)
+            if h >= thr:                      # см-штрихи — синим
+                cv2.rectangle(vis, (bx, by), (bx + bw, by + bh), (255, 0, 0), 2)
+                n_cm += 1
+            else:                             # остальные — зелёным
+                cv2.rectangle(vis, (bx, by), (bx + bw, by + bh), (0, 255, 0), 1)
             cv2.circle(vis, (int(round(t['cx'])), int(round(t['cy']))),
                        2, (0, 0, 255), -1)
 
-        txt = (f"mm/px = {mm_per_px:.6f}   1mm = {d_1mm:.2f}px   "
-               f"ticks = {len(ticks)}")
+        txt = (f"mm/px = {mm_per_px:.6f}   px/mm = {px_per_mm:.2f}   "
+               f"ticks = {len(ticks)}   cm = {n_cm}")
         cv2.putText(vis, txt, (10, 25), cv2.FONT_HERSHEY_SIMPLEX,
                     0.7, (0, 255, 255), 2)
 
