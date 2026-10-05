@@ -22,6 +22,7 @@
 import cv2
 import numpy as np
 
+from utils import to_uint8
 
 __all__ = ["calibrate_ruler"]
 
@@ -90,10 +91,7 @@ def _to_gray_uint8(image):
 	else:
 		gray = image.copy()
 
-	if gray.dtype != np.uint8:
-		gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-
-	return gray
+	return to_uint8(gray)
 
 
 def _preprocess_ruler(gray):

@@ -760,7 +760,7 @@ class FlaxSeedApp:
         self.root.update_idletasks()
 
         try:
-            mm_per_px = calibrate_ruler(self.original_bgr, debug=False)
+            mm_per_px = calibrate_ruler(self.original_bgr, debug=True)
 
             self.mm_per_px_var.set(f"{mm_per_px:.6f}")
             self.status_var.set(
