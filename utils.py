@@ -52,8 +52,9 @@ def to_uint8(img):
     if img.dtype == np.uint8:
         return img
 
-    img = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX)
-    return img.astype(np.uint8)
+    dst = np.empty_like(img)
+    cv2.normalize(img, dst, 0, 255, cv2.NORM_MINMAX)
+    return dst.astype(np.uint8)
 
 
 def ensure_odd(value, min_value=1):

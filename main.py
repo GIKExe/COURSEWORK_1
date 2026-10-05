@@ -185,19 +185,19 @@ class FlaxSeedApp:
 
         # key, label, low, high, step, default, kind
         self.param_defs = [
-            ("blur_kernel", "Размытие, ядро", 1, 31, 2, 5, "odd"),
-            ("close_kernel", "Close, морфология", 1, 31, 1, 7, "int"),
-            ("open_kernel", "Open, морфология", 1, 31, 1, 3, "int"),
+            ("blur_kernel", "Размытие, ядро", 1, 31, 2, 21, "odd"),
+            ("close_kernel", "Close, морфология", 1, 31, 1, 2, "int"),
+            ("open_kernel", "Open, морфология", 1, 31, 1, 5, "int"),
             ("min_area", "Мин. площадь, px", 10, 100000, 10, 200, "int"),
             ("max_area", "Макс. площадь, px", 100, 300000, 100, 80000, "int"),
             ("min_ratio", "Мин. вытянутость", 1.0, 10.0, 0.1, 1.0, "float"),
             ("max_ratio", "Макс. вытянутость", 1.0, 15.0, 0.1, 4.5, "float"),
             ("min_solidity", "Мин. solidity", 0.0, 1.0, 0.01, 0.60, "float"),
             ("min_extent", "Мин. extent", 0.0, 1.0, 0.01, 0.30, "float"),
-            ("min_contrast", "Мин. контраст", 0, 100, 1, 4, "int"),
-            ("max_edge_width", "Фокус: граница <=, px", 0.5, 15.0, 0.1, 4.5, "float"),
-            ("blur_edge_width", "Размыто: граница >=, px", 1.0, 25.0, 0.1, 7.0, "float"),
-            ("padding", "Отступ при сохранении, px", 0, 50, 1, 4, "int"),
+            ("min_contrast", "Мин. контраст", 0, 100, 1, 20, "int"),
+            ("max_edge_width", "Фокус: граница <=, px", 0.5, 15.0, 0.1, 3.9, "float"),
+            ("blur_edge_width", "Размыто: граница >=, px", 1.0, 25.0, 0.1, 6.0, "float"),
+            ("padding", "Отступ при сохранении, px", 0, 50, 1, 25, "int"),
         ]
 
         self.param_kinds = {}
