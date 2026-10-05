@@ -2,21 +2,27 @@ import os
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox
+
 import numpy as np
 import cv2
 from PIL import Image, ImageTk
+
+from utils import (
+    imread_unicode,
+    imwrite_unicode,
+    ensure_odd,
+    process_image,
+    compute_size_stats,
+    format_size_stats,
+)
+from ruler import calibrate_ruler
+
 
 try:
     RESAMPLE = Image.Resampling.LANCZOS
 except AttributeError:
     RESAMPLE = Image.ANTIALIAS
 
-STATUS_COLORS = {
-    "focused": (0, 200, 0),       # зелёный
-    "transition": (0, 220, 255),  # жёлтый
-    "blurry": (0, 0, 255),        # красный
-    "unknown": (80, 160, 255),    # оранжевый
-}
 
 TOOLTIPS = {
     "thresh_mode": (
@@ -79,7 +85,8 @@ TOOLTIPS = {
     ),
     "filter_edge": "Оставлять при обработке только зелёные сфокусированные семена.",
     "filter_outliers": (
-        "Удалять объекты, которые сильно отличаются от медианной площади и размера остальных семян."
+        "Удалять объекты, которые сильно отличаются от медианной площади "
+        "и размера остальных семян."
     ),
     "skip_blurry": (
         "При сохранении пропускать красные объекты.\n"
@@ -92,6 +99,10 @@ TOOLTIPS = {
         "Можно вводить с точкой или запятой.\n"
         "Пусто — замеры считаются в пикселях."
     ),
+    "calibrate_ruler": (
+        "Найти линейку на текущем фото и автоматически вычислить мм/px.\n"
+        "Результат будет подставлен в поле масштаба."
+    ),
 }
 
 
@@ -102,8 +113,10 @@ def setup_dpi_awareness():
     """
     if os.name != "nt":
         return
+
     try:
         import ctypes
+
         # Per-Monitor Aware (Windows 8.1+)
         try:
             ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -121,6 +134,7 @@ class ToolTip:
         self.widget = widget
         self.text = text
         self.tipwindow = None
+
         widget.bind("<Enter>", self.showtip, add="+")
         widget.bind("<Leave>", self.hidetip, add="+")
         widget.bind("<ButtonPress>", self.hidetip, add="+")
@@ -128,11 +142,14 @@ class ToolTip:
     def showtip(self, event=None):
         if self.tipwindow or not self.text:
             return
+
         x = self.widget.winfo_rootx() + 20
         y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5
+
         self.tipwindow = tw = tk.Toplevel(self.widget)
         tw.wm_overrideredirect(True)
         tw.wm_geometry(f"+{x}+{y}")
+
         try:
             tw.attributes("-topmost", True)
         except Exception:
@@ -157,600 +174,6 @@ class ToolTip:
             self.tipwindow = None
 
 
-# ------------------------------------------------------------
-# Ввод/вывод
-# ------------------------------------------------------------
-
-def imread_unicode(path):
-    """Читает изображение, включая пути с кириллицей."""
-    data = np.fromfile(path, dtype=np.uint8)
-    return cv2.imdecode(data, cv2.IMREAD_COLOR)
-
-
-def imwrite_unicode(path, img):
-    """Сохраняет изображение, включая пути с кириллицей."""
-    ext = os.path.splitext(path)[1]
-    if not ext:
-        ext = ".png"
-        path += ext
-    ok, buf = cv2.imencode(ext, img)
-    if ok:
-        buf.tofile(path)
-        return True
-    return False
-
-
-def to_uint8(img):
-    if img.dtype == np.uint8:
-        return img
-    img = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX)
-    return img.astype(np.uint8)
-
-
-def ensure_odd(value, min_value=1):
-    value = int(round(value))
-    if value < min_value:
-        value = min_value
-    if value % 2 == 0:
-        value += 1
-    return value
-
-
-# ------------------------------------------------------------
-# Сегментация
-# ------------------------------------------------------------
-
-def make_mask(gray, params):
-    """
-    Создаёт бинарную маску семян.
-    """
-    k = ensure_odd(params["blur_kernel"], 1)
-    blurred = cv2.GaussianBlur(gray, (k, k), 0)
-
-    if params["thresh_mode"] == "Adaptive":
-        block = ensure_odd(params["block_size"], 3)
-        c = int(params["adaptive_c"])
-        mask = cv2.adaptiveThreshold(
-            blurred,
-            255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY,
-            block,
-            c
-        )
-    else:
-        _, mask = cv2.threshold(
-            blurred,
-            0,
-            255,
-            cv2.THRESH_BINARY + cv2.THRESH_OTSU
-        )
-
-    # Если маска получилась инвертированной, исправляем.
-    # Белый класс должен быть светлее чёрного класса на исходном grayscale.
-    white_count = int(np.count_nonzero(mask))
-    if 0 < white_count < mask.size:
-        white_mask = mask > 0
-        mean_white = float(np.mean(gray[white_mask]))
-        mean_black = float(np.mean(gray[~white_mask]))
-        if mean_white < mean_black or white_count > mask.size * 0.6:
-            mask = cv2.bitwise_not(mask)
-    elif white_count == mask.size:
-        # Если всё стало белым, маска почти наверняка испорчена.
-        mask = np.zeros_like(mask)
-
-    close_k = max(1, int(params["close_kernel"]))
-    open_k = max(1, int(params["open_kernel"]))
-
-    if close_k > 1:
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_k, close_k))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-
-    if open_k > 1:
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_k, open_k))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-
-    return mask
-
-
-def remove_small_components(mask, min_area):
-    """Удаляет мелкие компоненты."""
-    num, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    if num <= 1:
-        return mask
-
-    keep = np.zeros(num, dtype=bool)
-    keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= max(1, int(min_area))
-    cleaned = np.where(keep[labels], 255, 0).astype(np.uint8)
-    return cleaned
-
-
-def fill_external_contours(mask, min_area):
-    """
-    Заполняет внешние контуры.
-    Это помогает закрыть дырки внутри семян.
-    """
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    filled = np.zeros_like(mask)
-    for cnt in contours:
-        if cv2.contourArea(cnt) >= min_area:
-            cv2.drawContours(filled, [cnt], -1, 255, thickness=cv2.FILLED)
-    return filled
-
-
-def object_contrast(gray, contour, bbox):
-    """
-    Примитивная оценка контраста объекта относительно локального фона.
-    """
-    x, y, w, h = bbox
-    img_h, img_w = gray.shape[:2]
-    pad = max(6, min(20, int(min(w, h) * 0.25)))
-
-    x0 = max(0, x - pad)
-    y0 = max(0, y - pad)
-    x1 = min(img_w, x + w + pad)
-    y1 = min(img_h, y + h + pad)
-
-    if x1 <= x0 or y1 <= y0:
-        return 0.0
-
-    roi = gray[y0:y1, x0:x1]
-    mask = np.zeros(roi.shape, dtype=np.uint8)
-
-    shifted = contour - np.array([x0, y0], dtype=np.int32)
-    cv2.drawContours(mask, [shifted.astype(np.int32)], -1, 255, thickness=cv2.FILLED)
-
-    if cv2.countNonZero(mask) == 0:
-        return 0.0
-
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    inner = cv2.erode(mask, kernel, iterations=1)
-    if cv2.countNonZero(inner) < 3:
-        inner = mask
-
-    outer = cv2.dilate(mask, kernel, iterations=4)
-    band = cv2.subtract(outer, mask)
-    if cv2.countNonZero(band) < 3:
-        band = cv2.bitwise_not(mask)
-
-    mean_in = cv2.mean(roi, mask=inner)[0]
-    mean_out = cv2.mean(roi, mask=band)[0]
-    return abs(float(mean_in) - float(mean_out))
-
-
-def filter_candidates_by_outliers(candidates):
-    """
-    Удаляет объекты, которые сильно отличаются от медианного размера/площади.
-    Полезно против одиночного мусора.
-    """
-    if len(candidates) < 6:
-        return candidates
-
-    areas = np.array([c["area"] for c in candidates], dtype=np.float32)
-    dims = np.array([min(c["bbox"][2], c["bbox"][3]) for c in candidates], dtype=np.float32)
-
-    med_a = float(np.median(areas))
-    med_d = float(np.median(dims))
-
-    if med_a <= 0 or med_d <= 0:
-        return candidates
-
-    lower_a = med_a * 0.35
-    upper_a = med_a * 3.0
-    lower_d = med_d * 0.45
-    upper_d = med_d * 3.0
-
-    filtered = []
-    for c in candidates:
-        a = c["area"]
-        d = min(c["bbox"][2], c["bbox"][3])
-        if lower_a <= a <= upper_a and lower_d <= d <= upper_d:
-            filtered.append(c)
-
-    return filtered
-
-
-def find_descending_crossing(x, y, level):
-    """
-    Ищет точку пересечения уровня при спадании значения.
-    Используется для оценки границы 80% -> 20%.
-    """
-    if len(x) < 2:
-        return None
-
-    x = np.asarray(x, dtype=np.float32)
-    y = np.asarray(y, dtype=np.float32)
-
-    for i in range(len(x) - 1):
-        y0 = y[i]
-        y1 = y[i + 1]
-        if (y0 - level) * (y1 - level) <= 0.0 and y0 >= y1:
-            if abs(y1 - y0) < 1e-6:
-                return float(x[i])
-            return float(x[i] + (level - y0) * (x[i + 1] - x[i]) / (y1 - y0))
-
-    if np.any(y >= level) and np.any(y < level):
-        idx = int(np.argmin(np.abs(y - level)))
-        return float(x[idx])
-
-    return None
-
-
-def estimate_edge_width(gray, contour, bbox, max_points=160):
-    """
-    Примерная оценка ширины переходной границы семя/фон.
-    """
-    x, y, w, h = bbox
-    if w < 4 or h < 4:
-        return None
-
-    pts = contour.reshape(-1, 2).astype(np.float32)
-
-    if len(pts) < 12:
-        return None
-
-    if len(pts) > max_points:
-        idx = np.linspace(0, len(pts) - 1, max_points, endpoint=False).astype(np.int32)
-        pts = pts[idx]
-
-    prev = np.roll(pts, -1, axis=0)
-    nxt = np.roll(pts, 1, axis=0)
-    tangents = prev - nxt
-    norms = np.linalg.norm(tangents, axis=1)
-    valid = norms > 1e-3
-
-    if int(valid.sum()) < 12:
-        return None
-
-    pts = pts[valid]
-    tangents = tangents[valid] / norms[valid, None]
-    normals = np.column_stack((-tangents[:, 1], tangents[:, 0]))
-
-    img_h, img_w = gray.shape[:2]
-    min_dim = max(3, min(w, h))
-    check_offset = float(np.clip(min_dim * 0.20, 2.0, 5.0))
-
-    def mean_at(offset):
-        coords = pts + normals * offset
-        xi = np.rint(coords[:, 0]).astype(np.int32)
-        yi = np.rint(coords[:, 1]).astype(np.int32)
-        ok = (xi >= 0) & (xi < img_w) & (yi >= 0) & (yi < img_h)
-        if not ok.any():
-            return np.nan
-        return float(np.mean(gray[yi[ok], xi[ok]]))
-
-    plus = mean_at(check_offset)
-    minus = mean_at(-check_offset)
-
-    if np.isnan(plus) or np.isnan(minus):
-        return None
-
-    outward = 1.0 if plus < minus else -1.0
-
-    inside_start = -int(np.clip(min_dim * 0.15, 2, 5))
-    max_out = int(np.clip(min_dim * 0.90, 8, 18))
-    distances = np.arange(inside_start, max_out + 1, 1, dtype=np.float32)
-    profile = np.array([mean_at(outward * d) for d in distances], dtype=np.float32)
-
-    good = ~np.isnan(profile)
-    if int(good.sum()) < max(6, len(distances) // 2):
-        return None
-
-    profile = np.interp(distances, distances[good], profile[good])
-
-    if len(profile) >= 5:
-        kernel = np.ones(5, dtype=np.float32) / 5.0
-        padded = np.pad(profile, 2, mode="edge")
-        profile_smooth = np.convolve(padded, kernel, mode="valid")
-    else:
-        profile_smooth = profile
-
-    inside_region = profile_smooth[distances <= (inside_start + 1)]
-    outside_region = profile_smooth[distances >= (max_out - 2)]
-
-    if len(inside_region) == 0 or len(outside_region) == 0:
-        return None
-
-    inside_val = float(np.mean(inside_region))
-    outside_val = float(np.mean(outside_region))
-    contrast = inside_val - outside_val
-
-    if abs(contrast) < 5.0:
-        return None
-
-    if contrast > 0:
-        norm_profile = (profile_smooth - outside_val) / contrast
-    else:
-        norm_profile = (outside_val - profile_smooth) / (-contrast)
-
-    norm_profile = np.clip(norm_profile, -0.5, 1.5)
-
-    d80 = find_descending_crossing(distances, norm_profile, 0.80)
-    d20 = find_descending_crossing(distances, norm_profile, 0.20)
-
-    if d80 is None or d20 is None:
-        return None
-
-    width = abs(float(d20 - d80))
-
-    if width < 0.3 or width > float(max_out - inside_start):
-        return None
-
-    return width
-
-
-def classify_edge(edge_width, params):
-    if edge_width is None:
-        return "unknown"
-    if edge_width <= float(params["max_edge_width"]):
-        return "focused"
-    if edge_width >= float(params["blur_edge_width"]):
-        return "blurry"
-    return "transition"
-
-
-def sort_items_reading_order(items, row_height_ratio=0.55):
-    """
-    Сортирует объекты как при чтении: слева направо внутри строки,
-    строки сверху вниз.
-
-    Допускается, что объекты в одной строке могут немного отличаться
-    по вертикали. Для этого используется допуск, зависящий от
-    медианной высоты объекта.
-    """
-    if len(items) <= 1:
-        return items
-
-    decorated = []
-    heights = []
-
-    for item in items:
-        x, y, w, h = item["bbox"]
-        cx = float(x) + float(w) * 0.5
-        cy = float(y) + float(h) * 0.5
-        decorated.append((cy, cx, item))
-        heights.append(float(h))
-
-    decorated.sort(key=lambda it: it[0])
-
-    med_h = float(np.median(np.array(heights, dtype=np.float32)))
-    row_tolerance = max(3.0, med_h * float(row_height_ratio))
-
-    rows = []
-    current_row = [decorated[0]]
-    prev_cy = decorated[0][0]
-
-    for cy, cx, item in decorated[1:]:
-        # Если вертикальный разрыв больше допуска — начинается новая строка.
-        if cy - prev_cy > row_tolerance:
-            rows.append(current_row)
-            current_row = []
-
-        current_row.append((cy, cx, item))
-        prev_cy = cy
-
-    if current_row:
-        rows.append(current_row)
-
-    sorted_items = []
-    for row in rows:
-        # Внутри строки сортируем по горизонтали, слева направо.
-        row.sort(key=lambda it: (it[1], it[0]))
-        sorted_items.extend([item for _, _, item in row])
-
-    return sorted_items
-
-
-def process_image(img_bgr, params):
-    """
-    Основная обработка изображения.
-    """
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    gray = to_uint8(gray)
-    gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
-
-    mask = make_mask(gray, params)
-
-    min_area = max(1, int(params["min_area"]))
-    max_area = max(min_area + 1, int(params["max_area"]))
-
-    mask = remove_small_components(mask, max(20, min_area // 4))
-    mask = fill_external_contours(mask, max(20, min_area // 4))
-
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    min_ratio = max(1.0, float(params["min_ratio"]))
-    max_ratio = max(min_ratio, float(params["max_ratio"]))
-    min_solidity = max(0.0, min(1.0, float(params["min_solidity"])))
-    min_extent = max(0.0, min(1.0, float(params["min_extent"])))
-    min_contrast = max(0.0, float(params["min_contrast"]))
-
-    if float(params["blur_edge_width"]) <= float(params["max_edge_width"]):
-        params = dict(params)
-        params["blur_edge_width"] = float(params["max_edge_width"]) + 0.1
-
-    estimate_edge = bool(params["estimate_edge"]) or bool(params["filter_edge"])
-    filter_edge = bool(params["filter_edge"])
-    filter_outliers = bool(params.get("filter_outliers", True))
-
-    img_h, img_w = gray.shape[:2]
-    raw_candidates = []
-    MIN_COMPACTNESS = 0.08
-
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        x, y, bw, bh = cv2.boundingRect(cnt)
-
-        if bw < 5 or bh < 5:
-            continue
-
-        rect_area = bw * bh
-        if area <= 0:
-            area = rect_area
-
-        if area < min_area or area > max_area:
-            continue
-
-        if bw > img_w * 0.9 or bh > img_h * 0.9:
-            continue
-
-        ratio = float(max(bw, bh)) / float(max(1, min(bw, bh)))
-        if ratio < min_ratio or ratio > max_ratio:
-            continue
-
-        hull = cv2.convexHull(cnt)
-        hull_area = cv2.contourArea(hull)
-        solidity = area / hull_area if hull_area > 0 else 0.0
-        extent = area / float(rect_area)
-
-        if solidity < min_solidity or extent < min_extent:
-            continue
-
-        perimeter = cv2.arcLength(cnt, True)
-        if perimeter <= 0:
-            continue
-
-        compactness = (4.0 * np.pi * area) / (perimeter * perimeter)
-        if compactness < MIN_COMPACTNESS:
-            continue
-
-        bbox = (x, y, bw, bh)
-        contrast = object_contrast(gray, cnt, bbox)
-        if contrast < min_contrast:
-            continue
-
-        raw_candidates.append({
-            "bbox": bbox,
-            "area": float(area),
-            "contour": cnt,
-        })
-
-    if filter_outliers:
-        raw_candidates = filter_candidates_by_outliers(raw_candidates)
-
-    items = []
-
-    for cand in raw_candidates:
-        edge_width = None
-        if estimate_edge:
-            edge_width = estimate_edge_width(gray, cand["contour"], cand["bbox"])
-
-        status = classify_edge(edge_width, params)
-
-        if filter_edge and status != "focused":
-            continue
-
-        # Замер: минимальный повёрнутый прямоугольник вокруг контура.
-        # Большая сторона — длина, меньшая — ширина (в пикселях).
-        rect = cv2.minAreaRect(cand["contour"])
-        side_a, side_b = rect[1]
-
-        cand["rect"] = rect
-        cand["length_px"] = float(max(side_a, side_b))
-        cand["width_px"] = float(min(side_a, side_b))
-        cand["edge_width"] = edge_width
-        cand["status"] = status
-
-        items.append(cand)
-
-    # ИСПРАВЛЕНИЕ:
-    # Старая сортировка items.sort(key=lambda it: (it["bbox"][1], it["bbox"][0]))
-    # ломала порядок, если объекты в одной строке немного отличались по Y.
-    # Теперь объекты сначала группируются в строки с допуском по вертикали,
-    # а затем сортируются слева направо внутри каждой строки.
-    items = sort_items_reading_order(items)
-
-    annotated = img_bgr.copy()
-    mm_per_px = params.get("mm_per_px")
-
-    for i, item in enumerate(items, 1):
-        x, y, bw, bh = item["bbox"]
-        color = STATUS_COLORS.get(item["status"], (255, 255, 255))
-
-        cv2.drawContours(annotated, [item["contour"]], -1, color, 1, lineType=cv2.LINE_AA)
-        cv2.rectangle(annotated, (x, y), (x + bw, y + bh), color, 2)
-
-        # Повёрнутый прямоугольник, по которому считаются длина и ширина
-        box = cv2.boxPoints(item["rect"]).astype(np.int32)
-        cv2.polylines(annotated, [box], True, (255, 0, 255), 1, cv2.LINE_AA)
-
-        label = f"{i}"
-        if item["edge_width"] is not None:
-            label += f" {item['edge_width']:.1f}px"
-
-        if mm_per_px:
-            label += f" | {item['length_px'] * mm_per_px:.2f}x{item['width_px'] * mm_per_px:.2f}mm"
-        else:
-            label += f" | {item['length_px']:.0f}x{item['width_px']:.0f}px"
-
-        ty = y - 6 if y - 20 > 0 else y + bh + 16
-        cv2.putText(
-            annotated,
-            label,
-            (x, ty),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (255, 255, 255),
-            1,
-            cv2.LINE_AA
-        )
-
-    return {
-        "items": items,
-        "annotated": annotated,
-        "mask": mask,
-    }
-
-
-# ------------------------------------------------------------
-# Статистика размеров
-# ------------------------------------------------------------
-
-def compute_size_stats(items, mm_per_px=None):
-    """
-    Считает мин / среднее / макс по длине и ширине семян.
-    Если mm_per_px не задан — значения остаются в пикселях.
-    """
-    if not items:
-        return None
-
-    k = float(mm_per_px) if mm_per_px else 1.0
-    lengths = np.array([it["length_px"] for it in items], dtype=np.float64) * k
-    widths = np.array([it["width_px"] for it in items], dtype=np.float64) * k
-
-    return {
-        "count": len(items),
-        "unit": "мм" if mm_per_px else "px",
-        "length": (float(lengths.min()), float(lengths.mean()), float(lengths.max())),
-        "width": (float(widths.min()), float(widths.mean()), float(widths.max())),
-    }
-
-
-def format_size_stats(stats):
-    if stats is None:
-        return "Нет данных"
-
-    unit = stats["unit"]
-    decimals = 2 if unit == "мм" else 1
-
-    def line(title, values):
-        mn, avg, mx = values
-        return (
-            f"{title}, {unit}:  "
-            f"мин {mn:.{decimals}f} / ср {avg:.{decimals}f} / макс {mx:.{decimals}f}"
-        )
-
-    return "\n".join([
-        f"Семян: {stats['count']}",
-        line("Длина", stats["length"]),
-        line("Ширина", stats["width"]),
-    ])
-
-
-# ------------------------------------------------------------
-# GUI
-# ------------------------------------------------------------
-
 class FlaxSeedApp:
     MIN_SCALE = 0.02
     MAX_SCALE = 16.0
@@ -758,10 +181,12 @@ class FlaxSeedApp:
 
     def __init__(self, root):
         self.root = root
+
         self.original_bgr = None
         self.result_bgr = None
         self.seed_items = []
         self.image_path = None
+
         self.tk_image = None
         self.current_view = "original"  # original / result
         self.display_scale = 1.0
@@ -816,7 +241,7 @@ class FlaxSeedApp:
             self.param_highs[key] = high
             self.param_steps[key] = step
 
-        # Масштаб (мм на пиксель) и текст статистики — отдельно от self.vars,
+        # Масштаб (мм на пиксель) и текст статистики размеров — отдельно от self.vars,
         # потому что mm/px вводится вручную и разбирается в get_params().
         self.mm_per_px_var = tk.StringVar(value="")
         self.stats_var = tk.StringVar(value="—")
@@ -838,6 +263,7 @@ class FlaxSeedApp:
         buttons = [
             ("Открыть фото", self.open_image),
             ("Обработать", self.process),
+            ("Калибровать линейку", self.calibrate_ruler_from_image),
             ("Исходное", self.show_original),
             ("Результат", self.show_result),
             ("Сохранить нарезку", self.save_crops),
@@ -845,7 +271,11 @@ class FlaxSeedApp:
         ]
 
         for text, cmd in buttons:
-            ttk.Button(toolbar, text=text, command=cmd).pack(side=tk.LEFT, padx=2)
+            btn = ttk.Button(toolbar, text=text, command=cmd)
+            btn.pack(side=tk.LEFT, padx=2)
+
+            if text == "Калибровать линейку":
+                ToolTip(btn, TOOLTIPS.get("calibrate_ruler", ""))
 
         ttk.Separator(toolbar, orient="vertical").pack(side=tk.LEFT, fill="y", padx=6)
 
@@ -879,7 +309,6 @@ class FlaxSeedApp:
             "<Configure>",
             lambda e: left_canvas.configure(scrollregion=left_canvas.bbox("all"))
         )
-
         left_canvas.bind(
             "<Configure>",
             lambda e, wid=win_id: left_canvas.itemconfigure(wid, width=e.width)
@@ -935,6 +364,7 @@ class FlaxSeedApp:
 
         # --- Масштаб и статистика размеров ---
         ttk.Label(pf, text="Масштаб, мм/px:").pack(anchor="w", padx=4, pady=(4, 0))
+
         mm_entry = ttk.Entry(pf, textvariable=self.mm_per_px_var, width=18)
         mm_entry.pack(fill=tk.X, padx=4)
         ToolTip(mm_entry, TOOLTIPS.get("mm_per_px", ""))
@@ -949,6 +379,7 @@ class FlaxSeedApp:
         ttk.Separator(pf, orient="horizontal").pack(fill="x", pady=4)
 
         ttk.Label(pf, text="Порог:").pack(anchor="w", padx=4, pady=(4, 0))
+
         combo = ttk.Combobox(
             pf,
             textvariable=self.vars["thresh_mode"],
@@ -1012,6 +443,7 @@ class FlaxSeedApp:
         low = self.param_lows[key]
         high = self.param_highs[key]
         step = self.param_steps[key]
+
         value = float(raw_value)
 
         if kind == "float":
@@ -1036,6 +468,7 @@ class FlaxSeedApp:
     def _on_scale(self, key, raw_value):
         value = self._round_param(key, raw_value)
         self.vars[key].set(value)
+
         if key in self.scale_value_labels:
             self.scale_value_labels[key].config(text=self._format_param(key))
 
@@ -1067,6 +500,7 @@ class FlaxSeedApp:
         Принимает и точку, и запятую.
         """
         text = self.mm_per_px_var.get().strip().replace(",", ".")
+
         if not text:
             return None
 
@@ -1091,8 +525,10 @@ class FlaxSeedApp:
 
     def _clamp_scale(self, scale, img):
         h, w = img.shape[:2]
+
         max_scale_by_dim = self.MAX_DISPLAY_DIM / float(max(w, h))
         max_scale = min(self.MAX_SCALE, max_scale_by_dim)
+
         return max(self.MIN_SCALE, min(max_scale, float(scale)))
 
     def _scroll_size(self):
@@ -1140,6 +576,7 @@ class FlaxSeedApp:
             return
 
         h, w = img.shape[:2]
+
         cw = max(1, self.canvas.winfo_width())
         ch = max(1, self.canvas.winfo_height())
 
@@ -1160,6 +597,7 @@ class FlaxSeedApp:
 
     def _refresh_view_after_change(self):
         self.canvas.update_idletasks()
+
         if self.fit_mode in ("width", "window"):
             self._apply_fit()
         else:
@@ -1205,9 +643,10 @@ class FlaxSeedApp:
 
         self.display_scale = new_scale
         self.fit_mode = "manual"
-        self._redraw_view()
 
+        self._redraw_view()
         self.canvas.update_idletasks()
+
         self._scroll_to_image_point(img_x, img_y, vx, vy)
 
     def _scroll_to_image_point(self, img_x, img_y, viewport_x, viewport_y):
@@ -1263,6 +702,7 @@ class FlaxSeedApp:
             return
 
         delta = 0
+
         if getattr(event, "delta", 0) != 0:
             delta = -1 if event.delta > 0 else 1
         elif getattr(event, "num", None) == 4:
@@ -1304,8 +744,8 @@ class FlaxSeedApp:
         self.original_bgr = img
         self.result_bgr = None
         self.seed_items = []
-        self.stats_var.set("—")
 
+        self.stats_var.set("—")
         self.current_view = "original"
         self.fit_mode = "width"
 
@@ -1348,6 +788,27 @@ class FlaxSeedApp:
             messagebox.showerror("Ошибка обработки", str(exc))
             self.status_var.set("Ошибка обработки.")
 
+    def calibrate_ruler_from_image(self):
+        if self.original_bgr is None:
+            messagebox.showwarning("Нет изображения", "Сначала откройте фото.")
+            return
+
+        self.status_var.set("Калибровка линейки...")
+        self.root.update_idletasks()
+
+        try:
+            mm_per_px = calibrate_ruler(self.original_bgr, debug=False)
+
+            self.mm_per_px_var.set(f"{mm_per_px:.6f}")
+            self.status_var.set(
+                f"Калибровка выполнена: {mm_per_px:.6f} мм/px "
+                f"({1.0 / mm_per_px:.2f} px/mm)."
+            )
+
+        except Exception as exc:
+            messagebox.showerror("Ошибка калибровки", str(exc))
+            self.status_var.set("Ошибка калибровки линейки.")
+
     def show_original(self):
         if self.original_bgr is None:
             messagebox.showwarning("Нет изображения", "Сначала откройте фото.")
@@ -1381,7 +842,10 @@ class FlaxSeedApp:
             items = [it for it in items if it["status"] != "blurry"]
 
         if not items:
-            messagebox.showwarning("Нет данных", "Нет объектов для сохранения по текущим фильтрам.")
+            messagebox.showwarning(
+                "Нет данных",
+                "Нет объектов для сохранения по текущим фильтрам."
+            )
             return
 
         dirpath = filedialog.askdirectory(title="Куда сохранить нарезанные семена")
@@ -1390,6 +854,7 @@ class FlaxSeedApp:
 
         h, w = self.original_bgr.shape[:2]
         pad = max(0, int(self.vars["padding"].get()))
+
         saved = 0
 
         for i, item in enumerate(items, 1):
@@ -1443,6 +908,7 @@ class FlaxSeedApp:
 
 def main():
     setup_dpi_awareness()
+
     root = tk.Tk()
 
     # Пытаемся сделать шрифты чёткими/масштабированными под DPI.
