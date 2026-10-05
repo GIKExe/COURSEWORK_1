@@ -2,7 +2,6 @@ import os
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox
-
 import numpy as np
 import cv2
 from PIL import Image, ImageTk
@@ -12,14 +11,12 @@ try:
 except AttributeError:
     RESAMPLE = Image.ANTIALIAS
 
-
 STATUS_COLORS = {
     "focused": (0, 200, 0),       # зелёный
     "transition": (0, 220, 255),  # жёлтый
     "blurry": (0, 0, 255),        # красный
     "unknown": (80, 160, 255),    # оранжевый
 }
-
 
 TOOLTIPS = {
     "thresh_mode": (
@@ -63,7 +60,7 @@ TOOLTIPS = {
         "Низкое значение — объект занимает мало своего бокса."
     ),
     "min_contrast": (
-        "Минимальная разница яркости между семнем и фоном.\n"
+        "Минимальная разница яркости между семенем и фоном.\n"
         "Помогает не брать слабый мусор.\n"
         "Если семена теряются — уменьшите значение."
     ),
@@ -105,10 +102,8 @@ def setup_dpi_awareness():
     """
     if os.name != "nt":
         return
-
     try:
         import ctypes
-
         # Per-Monitor Aware (Windows 8.1+)
         try:
             ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -126,7 +121,6 @@ class ToolTip:
         self.widget = widget
         self.text = text
         self.tipwindow = None
-
         widget.bind("<Enter>", self.showtip, add="+")
         widget.bind("<Leave>", self.hidetip, add="+")
         widget.bind("<ButtonPress>", self.hidetip, add="+")
@@ -134,14 +128,11 @@ class ToolTip:
     def showtip(self, event=None):
         if self.tipwindow or not self.text:
             return
-
         x = self.widget.winfo_rootx() + 20
         y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5
-
         self.tipwindow = tw = tk.Toplevel(self.widget)
         tw.wm_overrideredirect(True)
         tw.wm_geometry(f"+{x}+{y}")
-
         try:
             tw.attributes("-topmost", True)
         except Exception:
@@ -182,7 +173,6 @@ def imwrite_unicode(path, img):
     if not ext:
         ext = ".png"
         path += ext
-
     ok, buf = cv2.imencode(ext, img)
     if ok:
         buf.tofile(path)
@@ -220,8 +210,6 @@ def make_mask(gray, params):
     if params["thresh_mode"] == "Adaptive":
         block = ensure_odd(params["block_size"], 3)
         c = int(params["adaptive_c"])
-
-        # ПРАВИЛЬНЫЙ флаг: cv2.ADAPTIVE_THRESH_GAUSSIAN_C
         mask = cv2.adaptiveThreshold(
             blurred,
             255,
@@ -245,7 +233,6 @@ def make_mask(gray, params):
         white_mask = mask > 0
         mean_white = float(np.mean(gray[white_mask]))
         mean_black = float(np.mean(gray[~white_mask]))
-
         if mean_white < mean_black or white_count > mask.size * 0.6:
             mask = cv2.bitwise_not(mask)
     elif white_count == mask.size:
@@ -274,7 +261,6 @@ def remove_small_components(mask, min_area):
 
     keep = np.zeros(num, dtype=bool)
     keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= max(1, int(min_area))
-
     cleaned = np.where(keep[labels], 255, 0).astype(np.uint8)
     return cleaned
 
@@ -286,11 +272,9 @@ def fill_external_contours(mask, min_area):
     """
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     filled = np.zeros_like(mask)
-
     for cnt in contours:
         if cv2.contourArea(cnt) >= min_area:
             cv2.drawContours(filled, [cnt], -1, 255, thickness=cv2.FILLED)
-
     return filled
 
 
@@ -300,7 +284,6 @@ def object_contrast(gray, contour, bbox):
     """
     x, y, w, h = bbox
     img_h, img_w = gray.shape[:2]
-
     pad = max(6, min(20, int(min(w, h) * 0.25)))
 
     x0 = max(0, x - pad)
@@ -321,20 +304,17 @@ def object_contrast(gray, contour, bbox):
         return 0.0
 
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-
     inner = cv2.erode(mask, kernel, iterations=1)
     if cv2.countNonZero(inner) < 3:
         inner = mask
 
     outer = cv2.dilate(mask, kernel, iterations=4)
     band = cv2.subtract(outer, mask)
-
     if cv2.countNonZero(band) < 3:
         band = cv2.bitwise_not(mask)
 
     mean_in = cv2.mean(roi, mask=inner)[0]
     mean_out = cv2.mean(roi, mask=band)[0]
-
     return abs(float(mean_in) - float(mean_out))
 
 
@@ -357,7 +337,6 @@ def filter_candidates_by_outliers(candidates):
 
     lower_a = med_a * 0.35
     upper_a = med_a * 3.0
-
     lower_d = med_d * 0.45
     upper_d = med_d * 3.0
 
@@ -365,7 +344,6 @@ def filter_candidates_by_outliers(candidates):
     for c in candidates:
         a = c["area"]
         d = min(c["bbox"][2], c["bbox"][3])
-
         if lower_a <= a <= upper_a and lower_d <= d <= upper_d:
             filtered.append(c)
 
@@ -386,7 +364,6 @@ def find_descending_crossing(x, y, level):
     for i in range(len(x) - 1):
         y0 = y[i]
         y1 = y[i + 1]
-
         if (y0 - level) * (y1 - level) <= 0.0 and y0 >= y1:
             if abs(y1 - y0) < 1e-6:
                 return float(x[i])
@@ -408,6 +385,7 @@ def estimate_edge_width(gray, contour, bbox, max_points=160):
         return None
 
     pts = contour.reshape(-1, 2).astype(np.float32)
+
     if len(pts) < 12:
         return None
 
@@ -419,8 +397,8 @@ def estimate_edge_width(gray, contour, bbox, max_points=160):
     nxt = np.roll(pts, 1, axis=0)
     tangents = prev - nxt
     norms = np.linalg.norm(tangents, axis=1)
-
     valid = norms > 1e-3
+
     if int(valid.sum()) < 12:
         return None
 
@@ -436,11 +414,9 @@ def estimate_edge_width(gray, contour, bbox, max_points=160):
         coords = pts + normals * offset
         xi = np.rint(coords[:, 0]).astype(np.int32)
         yi = np.rint(coords[:, 1]).astype(np.int32)
-
         ok = (xi >= 0) & (xi < img_w) & (yi >= 0) & (yi < img_h)
         if not ok.any():
             return np.nan
-
         return float(np.mean(gray[yi[ok], xi[ok]]))
 
     plus = mean_at(check_offset)
@@ -454,10 +430,9 @@ def estimate_edge_width(gray, contour, bbox, max_points=160):
     inside_start = -int(np.clip(min_dim * 0.15, 2, 5))
     max_out = int(np.clip(min_dim * 0.90, 8, 18))
     distances = np.arange(inside_start, max_out + 1, 1, dtype=np.float32)
-
     profile = np.array([mean_at(outward * d) for d in distances], dtype=np.float32)
-    good = ~np.isnan(profile)
 
+    good = ~np.isnan(profile)
     if int(good.sum()) < max(6, len(distances) // 2):
         return None
 
@@ -507,14 +482,63 @@ def estimate_edge_width(gray, contour, bbox, max_points=160):
 def classify_edge(edge_width, params):
     if edge_width is None:
         return "unknown"
-
     if edge_width <= float(params["max_edge_width"]):
         return "focused"
-
     if edge_width >= float(params["blur_edge_width"]):
         return "blurry"
-
     return "transition"
+
+
+def sort_items_reading_order(items, row_height_ratio=0.55):
+    """
+    Сортирует объекты как при чтении: слева направо внутри строки,
+    строки сверху вниз.
+
+    Допускается, что объекты в одной строке могут немного отличаться
+    по вертикали. Для этого используется допуск, зависящий от
+    медианной высоты объекта.
+    """
+    if len(items) <= 1:
+        return items
+
+    decorated = []
+    heights = []
+
+    for item in items:
+        x, y, w, h = item["bbox"]
+        cx = float(x) + float(w) * 0.5
+        cy = float(y) + float(h) * 0.5
+        decorated.append((cy, cx, item))
+        heights.append(float(h))
+
+    decorated.sort(key=lambda it: it[0])
+
+    med_h = float(np.median(np.array(heights, dtype=np.float32)))
+    row_tolerance = max(3.0, med_h * float(row_height_ratio))
+
+    rows = []
+    current_row = [decorated[0]]
+    prev_cy = decorated[0][0]
+
+    for cy, cx, item in decorated[1:]:
+        # Если вертикальный разрыв больше допуска — начинается новая строка.
+        if cy - prev_cy > row_tolerance:
+            rows.append(current_row)
+            current_row = []
+
+        current_row.append((cy, cx, item))
+        prev_cy = cy
+
+    if current_row:
+        rows.append(current_row)
+
+    sorted_items = []
+    for row in rows:
+        # Внутри строки сортируем по горизонтали, слева направо.
+        row.sort(key=lambda it: (it[1], it[0]))
+        sorted_items.extend([item for _, _, item in row])
+
+    return sorted_items
 
 
 def process_image(img_bgr, params):
@@ -537,7 +561,6 @@ def process_image(img_bgr, params):
 
     min_ratio = max(1.0, float(params["min_ratio"]))
     max_ratio = max(min_ratio, float(params["max_ratio"]))
-
     min_solidity = max(0.0, min(1.0, float(params["min_solidity"])))
     min_extent = max(0.0, min(1.0, float(params["min_extent"])))
     min_contrast = max(0.0, float(params["min_contrast"]))
@@ -551,7 +574,6 @@ def process_image(img_bgr, params):
     filter_outliers = bool(params.get("filter_outliers", True))
 
     img_h, img_w = gray.shape[:2]
-
     raw_candidates = []
     MIN_COMPACTNESS = 0.08
 
@@ -593,7 +615,6 @@ def process_image(img_bgr, params):
             continue
 
         bbox = (x, y, bw, bh)
-
         contrast = object_contrast(gray, cnt, bbox)
         if contrast < min_contrast:
             continue
@@ -611,7 +632,6 @@ def process_image(img_bgr, params):
 
     for cand in raw_candidates:
         edge_width = None
-
         if estimate_edge:
             edge_width = estimate_edge_width(gray, cand["contour"], cand["bbox"])
 
@@ -624,15 +644,21 @@ def process_image(img_bgr, params):
         # Большая сторона — длина, меньшая — ширина (в пикселях).
         rect = cv2.minAreaRect(cand["contour"])
         side_a, side_b = rect[1]
+
         cand["rect"] = rect
         cand["length_px"] = float(max(side_a, side_b))
         cand["width_px"] = float(min(side_a, side_b))
-
         cand["edge_width"] = edge_width
         cand["status"] = status
+
         items.append(cand)
 
-    items.sort(key=lambda it: (it["bbox"][1], it["bbox"][0]))
+    # ИСПРАВЛЕНИЕ:
+    # Старая сортировка items.sort(key=lambda it: (it["bbox"][1], it["bbox"][0]))
+    # ломала порядок, если объекты в одной строке немного отличались по Y.
+    # Теперь объекты сначала группируются в строки с допуском по вертикали,
+    # а затем сортируются слева направо внутри каждой строки.
+    items = sort_items_reading_order(items)
 
     annotated = img_bgr.copy()
     mm_per_px = params.get("mm_per_px")
@@ -689,7 +715,6 @@ def compute_size_stats(items, mm_per_px=None):
         return None
 
     k = float(mm_per_px) if mm_per_px else 1.0
-
     lengths = np.array([it["length_px"] for it in items], dtype=np.float64) * k
     widths = np.array([it["width_px"] for it in items], dtype=np.float64) * k
 
@@ -738,7 +763,6 @@ class FlaxSeedApp:
         self.seed_items = []
         self.image_path = None
         self.tk_image = None
-
         self.current_view = "original"  # original / result
         self.display_scale = 1.0
         self.fit_mode = "width"         # width / window / manual
@@ -862,7 +886,6 @@ class FlaxSeedApp:
         )
 
         left_canvas.configure(yscrollcommand=left_scroll.set)
-
         left_canvas.pack(side=tk.LEFT, fill=tk.Y)
         left_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
@@ -870,7 +893,6 @@ class FlaxSeedApp:
 
         right = ttk.Frame(main)
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
         right.columnconfigure(0, weight=1)
         right.rowconfigure(0, weight=1)
 
@@ -884,7 +906,6 @@ class FlaxSeedApp:
         hbar.grid(row=1, column=0, sticky="ew")
 
         self.canvas.configure(yscrollcommand=vbar.set, xscrollcommand=hbar.set)
-
         self.canvas.bind("<Configure>", self._on_canvas_configure)
 
         # Зум: Ctrl + колесо
@@ -914,7 +935,6 @@ class FlaxSeedApp:
 
         # --- Масштаб и статистика размеров ---
         ttk.Label(pf, text="Масштаб, мм/px:").pack(anchor="w", padx=4, pady=(4, 0))
-
         mm_entry = ttk.Entry(pf, textvariable=self.mm_per_px_var, width=18)
         mm_entry.pack(fill=tk.X, padx=4)
         ToolTip(mm_entry, TOOLTIPS.get("mm_per_px", ""))
@@ -929,7 +949,6 @@ class FlaxSeedApp:
         ttk.Separator(pf, orient="horizontal").pack(fill="x", pady=4)
 
         ttk.Label(pf, text="Порог:").pack(anchor="w", padx=4, pady=(4, 0))
-
         combo = ttk.Combobox(
             pf,
             textvariable=self.vars["thresh_mode"],
@@ -1017,7 +1036,6 @@ class FlaxSeedApp:
     def _on_scale(self, key, raw_value):
         value = self._round_param(key, raw_value)
         self.vars[key].set(value)
-
         if key in self.scale_value_labels:
             self.scale_value_labels[key].config(text=self._format_param(key))
 
@@ -1111,7 +1129,6 @@ class FlaxSeedApp:
             pil_img = pil_img.resize((new_w, new_h), RESAMPLE)
 
         self.tk_image = ImageTk.PhotoImage(pil_img)
-
         self.canvas.create_image(0, 0, anchor="nw", image=self.tk_image)
         self.canvas.configure(scrollregion=(0, 0, new_w, new_h))
 
@@ -1123,7 +1140,6 @@ class FlaxSeedApp:
             return
 
         h, w = img.shape[:2]
-
         cw = max(1, self.canvas.winfo_width())
         ch = max(1, self.canvas.winfo_height())
 
@@ -1144,7 +1160,6 @@ class FlaxSeedApp:
 
     def _refresh_view_after_change(self):
         self.canvas.update_idletasks()
-
         if self.fit_mode in ("width", "window"):
             self._apply_fit()
         else:
@@ -1190,10 +1205,9 @@ class FlaxSeedApp:
 
         self.display_scale = new_scale
         self.fit_mode = "manual"
-
         self._redraw_view()
-        self.canvas.update_idletasks()
 
+        self.canvas.update_idletasks()
         self._scroll_to_image_point(img_x, img_y, vx, vy)
 
     def _scroll_to_image_point(self, img_x, img_y, viewport_x, viewport_y):
@@ -1249,7 +1263,6 @@ class FlaxSeedApp:
             return
 
         delta = 0
-
         if getattr(event, "delta", 0) != 0:
             delta = -1 if event.delta > 0 else 1
         elif getattr(event, "num", None) == 4:
@@ -1292,6 +1305,7 @@ class FlaxSeedApp:
         self.result_bgr = None
         self.seed_items = []
         self.stats_var.set("—")
+
         self.current_view = "original"
         self.fit_mode = "width"
 
@@ -1429,7 +1443,6 @@ class FlaxSeedApp:
 
 def main():
     setup_dpi_awareness()
-
     root = tk.Tk()
 
     # Пытаемся сделать шрифты чёткими/масштабированными под DPI.
