@@ -5,10 +5,12 @@
 фильтрация объектов;
 оценка фокуса;
 замеры семян;
-статистика размеров.
+статистика размеров;
+экспорт параметров в CSV.
 """
 
 import os
+import csv
 
 import cv2
 import numpy as np
@@ -19,6 +21,13 @@ STATUS_COLORS = {
     "transition": (0, 220, 255),  # жёлтый
     "blurry": (0, 0, 255),        # красный
     "unknown": (80, 160, 255),    # оранжевый
+}
+
+STATUS_NAMES_RU = {
+    "focused": "фокус",
+    "transition": "транзит",
+    "blurry": "размыто",
+    "unknown": "неизвестно",
 }
 
 
@@ -54,6 +63,7 @@ def to_uint8(img):
 
     dst = np.empty_like(img)
     cv2.normalize(img, dst, 0, 255, cv2.NORM_MINMAX)
+
     return dst.astype(np.uint8)
 
 
@@ -69,6 +79,111 @@ def ensure_odd(value, min_value=1):
     return value
 
 
+def write_items_csv(path, items, mm_per_px=None):
+    """
+    Сохраняет параметры семян в CSV.
+    Используется utf-8-sig, чтобы файл корректно открывался в Excel.
+    """
+    fieldnames = [
+        "filename",
+        "index",
+        "status",
+        "status_ru",
+        "edge_width_px",
+        "bbox_x",
+        "bbox_y",
+        "bbox_w",
+        "bbox_h",
+        "center_x",
+        "center_y",
+        "length_px",
+        "width_px",
+        "angle_deg",
+        "area_px",
+        "solidity",
+        "extent",
+        "compactness",
+        "contrast",
+        "length_mm",
+        "width_mm",
+        "mm_per_px",
+    ]
+
+    k = None
+    if mm_per_px is not None:
+        try:
+            k = float(mm_per_px)
+            if not np.isfinite(k) or k <= 0:
+                k = None
+        except (TypeError, ValueError):
+            k = None
+
+    def fmt(value, digits=3):
+        if value is None:
+            return ""
+
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return ""
+
+        if not np.isfinite(value):
+            return ""
+
+        return f"{value:.{digits}f}"
+
+    out_dir = os.path.dirname(path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+
+        for idx, item in enumerate(items, 1):
+            bbox = item.get("bbox", (0, 0, 0, 0))
+
+            try:
+                x, y, w, h = bbox
+                x = int(x)
+                y = int(y)
+                w = int(w)
+                h = int(h)
+            except Exception:
+                x = y = w = h = 0
+
+            length_px = item.get("length_px", None)
+            width_px = item.get("width_px", None)
+            status = str(item.get("status", "unknown"))
+
+            row = {
+                "filename": item.get("filename", f"{idx:03d}.png"),
+                "index": item.get("saved_index", idx),
+                "status": status,
+                "status_ru": STATUS_NAMES_RU.get(status, status),
+                "edge_width_px": fmt(item.get("edge_width"), 3),
+                "bbox_x": x,
+                "bbox_y": y,
+                "bbox_w": w,
+                "bbox_h": h,
+                "center_x": fmt(item.get("center_x"), 3),
+                "center_y": fmt(item.get("center_y"), 3),
+                "length_px": fmt(length_px, 3),
+                "width_px": fmt(width_px, 3),
+                "angle_deg": fmt(item.get("angle_deg", item.get("angle", None)), 3),
+                "area_px": fmt(item.get("area"), 1),
+                "solidity": fmt(item.get("solidity"), 4),
+                "extent": fmt(item.get("extent"), 4),
+                "compactness": fmt(item.get("compactness"), 4),
+                "contrast": fmt(item.get("contrast"), 2),
+                "length_mm": fmt(float(length_px) * k, 4) if (length_px is not None and k is not None) else "",
+                "width_mm": fmt(float(width_px) * k, 4) if (width_px is not None and k is not None) else "",
+                "mm_per_px": fmt(k, 8) if k is not None else "",
+            }
+
+            writer.writerow(row)
+
+
 # ------------------------------------------------------------
 # Сегментация
 # ------------------------------------------------------------
@@ -79,6 +194,7 @@ def make_mask(gray, params):
     Используется только глобальный порог Otsu.
     """
     k = ensure_odd(params["blur_kernel"], 1)
+
     blurred = cv2.GaussianBlur(gray, (k, k), 0)
 
     _, mask = cv2.threshold(
@@ -94,12 +210,12 @@ def make_mask(gray, params):
 
     if 0 < white_count < mask.size:
         white_mask = mask > 0
+
         mean_white = float(np.mean(gray[white_mask]))
         mean_black = float(np.mean(gray[~white_mask]))
 
         if mean_white < mean_black or white_count > mask.size * 0.6:
             mask = cv2.bitwise_not(mask)
-
     elif white_count == mask.size:
         # Если всё стало белым, маска почти наверняка испорчена.
         mask = np.zeros_like(mask)
@@ -129,6 +245,7 @@ def remove_small_components(mask, min_area):
     keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= max(1, int(min_area))
 
     cleaned = np.where(keep[labels], 255, 0).astype(np.uint8)
+
     return cleaned
 
 
@@ -282,11 +399,11 @@ def estimate_edge_width(gray, contour, bbox, max_points=160):
 
     prev = np.roll(pts, -1, axis=0)
     nxt = np.roll(pts, 1, axis=0)
+
     tangents = prev - nxt
-
     norms = np.linalg.norm(tangents, axis=1)
-    valid = norms > 1e-3
 
+    valid = norms > 1e-3
     if int(valid.sum()) < 12:
         return None
 
@@ -327,7 +444,6 @@ def estimate_edge_width(gray, contour, bbox, max_points=160):
     profile = np.array([mean_at(outward * d) for d in distances], dtype=np.float32)
 
     good = ~np.isnan(profile)
-
     if int(good.sum()) < max(6, len(distances) // 2):
         return None
 
@@ -505,6 +621,7 @@ def process_image(img_bgr, params):
 
         hull = cv2.convexHull(cnt)
         hull_area = cv2.contourArea(hull)
+
         solidity = area / hull_area if hull_area > 0 else 0.0
         extent = area / float(rect_area)
 
@@ -529,6 +646,10 @@ def process_image(img_bgr, params):
             "bbox": bbox,
             "area": float(area),
             "contour": cnt,
+            "solidity": float(solidity),
+            "extent": float(extent),
+            "contrast": float(contrast),
+            "compactness": float(compactness),
         })
 
     if filter_outliers:
@@ -550,11 +671,33 @@ def process_image(img_bgr, params):
         # Замер: минимальный повёрнутый прямоугольник вокруг контура.
         # Большая сторона — длина, меньшая — ширина (в пикселях).
         rect = cv2.minAreaRect(cand["contour"])
+        box = cv2.boxPoints(rect)
+
         side_a, side_b = rect[1]
+        length_px = float(max(side_a, side_b))
+        width_px = float(min(side_a, side_b))
+
+        # Угол основной длинной стороны повёрнутого прямоугольника.
+        edge1 = box[1] - box[0]
+        edge2 = box[2] - box[1]
+
+        len1 = float(np.linalg.norm(edge1))
+        len2 = float(np.linalg.norm(edge2))
+
+        major_edge = edge1 if len1 >= len2 else edge2
+
+        if np.isfinite(major_edge[0]) and np.isfinite(major_edge[1]) and np.linalg.norm(major_edge) > 1e-6:
+            angle_deg = float(np.degrees(np.arctan2(major_edge[1], major_edge[0]))) % 180.0
+        else:
+            angle_deg = 0.0
 
         cand["rect"] = rect
-        cand["length_px"] = float(max(side_a, side_b))
-        cand["width_px"] = float(min(side_a, side_b))
+        cand["box"] = box
+        cand["center_x"] = float(rect[0][0])
+        cand["center_y"] = float(rect[0][1])
+        cand["length_px"] = length_px
+        cand["width_px"] = width_px
+        cand["angle_deg"] = angle_deg
         cand["edge_width"] = edge_width
         cand["status"] = status
 
@@ -667,6 +810,7 @@ def format_size_stats(stats):
 
     def line(title, values):
         mn, avg, mx = values
+
         return (
             f"{title}, {unit}:  "
             f"мин {mn:.{decimals}f} / ср {avg:.{decimals}f} / макс {mx:.{decimals}f}"

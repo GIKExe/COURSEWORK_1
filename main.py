@@ -14,10 +14,16 @@ from utils import (
     process_image,
     compute_size_stats,
     format_size_stats,
+    write_items_csv,
 )
 from ruler import calibrate_ruler
 
+
 RESAMPLE = Image.Resampling.LANCZOS
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_OUT_DIR = os.path.join(BASE_DIR, "out")
+
 TOOLTIPS = {
     "blur_kernel": (
         "Размер ядра гауссова размытия перед порогом.\n"
@@ -492,8 +498,10 @@ class FlaxSeedApp:
 
     def _clamp_scale(self, scale, img):
         h, w = img.shape[:2]
+
         max_scale_by_dim = self.MAX_DISPLAY_DIM / float(max(w, h))
         max_scale = min(self.MAX_SCALE, max_scale_by_dim)
+
         return max(self.MIN_SCALE, min(max_scale, float(scale)))
 
     def _scroll_size(self):
@@ -607,9 +615,10 @@ class FlaxSeedApp:
 
         self.display_scale = new_scale
         self.fit_mode = "manual"
-        self._redraw_view()
 
+        self._redraw_view()
         self.canvas.update_idletasks()
+
         self._scroll_to_image_point(img_x, img_y, vx, vy)
 
     def _scroll_to_image_point(self, img_x, img_y, viewport_x, viewport_y):
@@ -707,8 +716,8 @@ class FlaxSeedApp:
         self.original_bgr = img
         self.result_bgr = None
         self.seed_items = []
-
         self.stats_var.set("—")
+
         self.current_view = "original"
         self.fit_mode = "width"
 
@@ -746,7 +755,6 @@ class FlaxSeedApp:
                 f"Найдено: {len(self.seed_items)}; "
                 f"фокус: {n_focus}; размыто: {n_blur}; неизвестно: {n_unknown}."
             )
-
         except Exception as exc:
             messagebox.showerror("Ошибка обработки", str(exc))
             self.status_var.set("Ошибка обработки.")
@@ -761,13 +769,12 @@ class FlaxSeedApp:
 
         try:
             mm_per_px = calibrate_ruler(self.original_bgr, debug=True)
-
             self.mm_per_px_var.set(f"{mm_per_px:.6f}")
+
             self.status_var.set(
                 f"Калибровка выполнена: {mm_per_px:.6f} мм/px "
                 f"({1.0 / mm_per_px:.2f} px/mm)."
             )
-
         except Exception as exc:
             messagebox.showerror("Ошибка калибровки", str(exc))
             self.status_var.set("Ошибка калибровки линейки.")
@@ -811,13 +818,25 @@ class FlaxSeedApp:
             )
             return
 
-        dirpath = filedialog.askdirectory(title="Куда сохранить нарезанные семена")
-        if not dirpath:
+        try:
+            mm_per_px = self._parse_mm_per_px()
+        except ValueError as exc:
+            messagebox.showerror("Ошибка масштаба", str(exc))
+            return
+
+        out_dir = DEFAULT_OUT_DIR
+
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except Exception as exc:
+            messagebox.showerror("Ошибка", f"Не удалось создать папку out: {exc}")
             return
 
         h, w = self.original_bgr.shape[:2]
         pad = max(0, int(self.vars["padding"].get()))
+
         saved = 0
+        saved_items = []
 
         for i, item in enumerate(items, 1):
             x, y, bw, bh = item["bbox"]
@@ -831,18 +850,30 @@ class FlaxSeedApp:
             if crop.size == 0:
                 continue
 
-            if item["edge_width"] is None:
-                edge_txt = "NA"
-            else:
-                edge_txt = f"{item['edge_width']:.1f}px".replace(".", "_")
+            filename = f"{i:03d}.png"
+            full_path = os.path.join(out_dir, filename)
 
-            filename = f"seed_{i:03d}_{item['status']}_{edge_txt}.png"
-            full_path = os.path.join(dirpath, filename)
+            if not imwrite_unicode(full_path, crop):
+                continue
 
-            if imwrite_unicode(full_path, crop):
-                saved += 1
+            saved += 1
 
-        self.status_var.set(f"Сохранено {saved} из {len(items)} фрагментов в: {dirpath}")
+            row_item = dict(item)
+            row_item["filename"] = filename
+            row_item["saved_index"] = i
+            saved_items.append(row_item)
+
+        csv_path = os.path.join(out_dir, "seeds.csv")
+
+        try:
+            write_items_csv(csv_path, saved_items, mm_per_px=mm_per_px)
+        except Exception as exc:
+            messagebox.showerror("Ошибка CSV", f"Не удалось сохранить CSV: {exc}")
+            return
+
+        self.status_var.set(
+            f"Сохранено {saved} из {len(items)} фрагментов и seeds.csv в: {out_dir}"
+        )
 
     def save_result_image(self):
         if self.result_bgr is None:
