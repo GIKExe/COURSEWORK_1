@@ -1,12 +1,14 @@
 """
 Обработчики изображения:
-- чтение/запись с поддержкой кириллицы;
-- сегментация;
-- фильтрация объектов;
-- оценка фокуса;
-- замеры семян;
-- статистика размеров.
+чтение/запись с поддержкой кириллицы;
+сегментация;
+фильтрация объектов;
+оценка фокуса;
+замеры семян;
+статистика размеров.
 """
+
+import os
 
 import cv2
 import numpy as np
@@ -73,29 +75,17 @@ def ensure_odd(value, min_value=1):
 def make_mask(gray, params):
     """
     Создаёт бинарную маску семян.
+    Используется только глобальный порог Otsu.
     """
     k = ensure_odd(params["blur_kernel"], 1)
     blurred = cv2.GaussianBlur(gray, (k, k), 0)
 
-    if params["thresh_mode"] == "Adaptive":
-        block = ensure_odd(params["block_size"], 3)
-        c = int(params["adaptive_c"])
-
-        mask = cv2.adaptiveThreshold(
-            blurred,
-            255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY,
-            block,
-            c
-        )
-    else:
-        _, mask = cv2.threshold(
-            blurred,
-            0,
-            255,
-            cv2.THRESH_BINARY + cv2.THRESH_OTSU
-        )
+    _, mask = cv2.threshold(
+        blurred,
+        0,
+        255,
+        cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
 
     # Если маска получилась инвертированной, исправляем.
     # Белый класс должен быть светлее чёрного класса на исходном grayscale.
@@ -103,7 +93,6 @@ def make_mask(gray, params):
 
     if 0 < white_count < mask.size:
         white_mask = mask > 0
-
         mean_white = float(np.mean(gray[white_mask]))
         mean_black = float(np.mean(gray[~white_mask]))
 
@@ -163,8 +152,8 @@ def object_contrast(gray, contour, bbox):
     Примитивная оценка контраста объекта относительно локального фона.
     """
     x, y, w, h = bbox
-
     img_h, img_w = gray.shape[:2]
+
     pad = max(6, min(20, int(min(w, h) * 0.25)))
 
     x0 = max(0, x - pad)
@@ -292,11 +281,11 @@ def estimate_edge_width(gray, contour, bbox, max_points=160):
 
     prev = np.roll(pts, -1, axis=0)
     nxt = np.roll(pts, 1, axis=0)
-
     tangents = prev - nxt
-    norms = np.linalg.norm(tangents, axis=1)
 
+    norms = np.linalg.norm(tangents, axis=1)
     valid = norms > 1e-3
+
     if int(valid.sum()) < 12:
         return None
 
@@ -515,7 +504,6 @@ def process_image(img_bgr, params):
 
         hull = cv2.convexHull(cnt)
         hull_area = cv2.contourArea(hull)
-
         solidity = area / hull_area if hull_area > 0 else 0.0
         extent = area / float(rect_area)
 
@@ -601,6 +589,7 @@ def process_image(img_bgr, params):
 
         # Повёрнутый прямоугольник, по которому считаются длина и ширина.
         box = cv2.boxPoints(item["rect"]).astype(np.int32)
+
         cv2.polylines(
             annotated,
             [box],
@@ -650,7 +639,7 @@ def process_image(img_bgr, params):
 def compute_size_stats(items, mm_per_px=None):
     """
     Считает мин / среднее / макс по длине и ширине семян.
-    Если mm_per_px не задан — значения остаются в пикселях.
+    Если мм/px не задан — значения остаются в пикселях.
     """
     if not items:
         return None
@@ -677,7 +666,6 @@ def format_size_stats(stats):
 
     def line(title, values):
         mn, avg, mx = values
-
         return (
             f"{title}, {unit}:  "
             f"мин {mn:.{decimals}f} / ср {avg:.{decimals}f} / макс {mx:.{decimals}f}"
@@ -688,7 +676,3 @@ def format_size_stats(stats):
         line("Длина", stats["length"]),
         line("Ширина", stats["width"]),
     ])
-
-
-# Для совместимости с imwrite_unicode, если вдруг используется снаружи.
-import os

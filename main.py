@@ -17,31 +17,11 @@ from utils import (
 )
 from ruler import calibrate_ruler
 
-
-try:
-    RESAMPLE = Image.Resampling.LANCZOS
-except AttributeError:
-    RESAMPLE = Image.ANTIALIAS
-
-
+RESAMPLE = Image.Resampling.LANCZOS
 TOOLTIPS = {
-    "thresh_mode": (
-        "Способ бинаризации.\n"
-        "Otsu — глобальный порог, хорош при равномерном тёмном фоне.\n"
-        "Adaptive — локальный порог, лучше при неравномерном освещении."
-    ),
     "blur_kernel": (
         "Размер ядра гауссова размытия перед порогом.\n"
         "Убирает шум, но слишком большое значение ухудшает границы."
-    ),
-    "block_size": (
-        "Размер локальной области для Adaptive.\n"
-        "Должен быть нечётным.\n"
-        "Больше значение — устойчивее к градиенту фона."
-    ),
-    "adaptive_c": (
-        "Константа, вычитаемая из локального среднего в Adaptive.\n"
-        "Положительное значение — строже, отрицательное — больше объектов."
     ),
     "close_kernel": (
         "Морфологическое закрытие.\n"
@@ -186,8 +166,8 @@ class FlaxSeedApp:
         self.result_bgr = None
         self.seed_items = []
         self.image_path = None
-
         self.tk_image = None
+
         self.current_view = "original"  # original / result
         self.display_scale = 1.0
         self.fit_mode = "width"         # width / window / manual
@@ -206,8 +186,6 @@ class FlaxSeedApp:
         # key, label, low, high, step, default, kind
         self.param_defs = [
             ("blur_kernel", "Размытие, ядро", 1, 31, 2, 5, "odd"),
-            ("block_size", "Adaptive block size", 3, 199, 2, 51, "odd"),
-            ("adaptive_c", "Adaptive C", -30, 30, 1, 5, "int"),
             ("close_kernel", "Close, морфология", 1, 31, 1, 7, "int"),
             ("open_kernel", "Open, морфология", 1, 31, 1, 3, "int"),
             ("min_area", "Мин. площадь, px", 10, 100000, 10, 200, "int"),
@@ -242,11 +220,10 @@ class FlaxSeedApp:
             self.param_steps[key] = step
 
         # Масштаб (мм на пиксель) и текст статистики размеров — отдельно от self.vars,
-        # потому что mm/px вводится вручную и разбирается в get_params().
+        # потому что мм/px вводится вручную и разбирается в get_params().
         self.mm_per_px_var = tk.StringVar(value="")
         self.stats_var = tk.StringVar(value="—")
 
-        self.vars["thresh_mode"] = tk.StringVar(value="Otsu")
         self.vars["estimate_edge"] = tk.BooleanVar(value=True)
         self.vars["filter_edge"] = tk.BooleanVar(value=False)
         self.vars["filter_outliers"] = tk.BooleanVar(value=True)
@@ -292,6 +269,14 @@ class FlaxSeedApp:
 
         self.zoom_label = ttk.Label(toolbar, text="100%", width=6, anchor="center")
         self.zoom_label.pack(side=tk.LEFT, padx=4)
+
+        status = ttk.Label(
+            self.root,
+            textvariable=self.status_var,
+            anchor="w",
+            padding=(5, 2)
+        )
+        status.pack(fill=tk.X, side=tk.BOTTOM)
 
         main = ttk.Frame(self.root, padding=5)
         main.pack(fill=tk.BOTH, expand=True)
@@ -351,14 +336,6 @@ class FlaxSeedApp:
         self.canvas.bind("<ButtonPress-1>", lambda e: self.canvas.scan_mark(e.x, e.y))
         self.canvas.bind("<B1-Motion>", lambda e: self.canvas.scan_dragto(e.x, e.y, gain=1))
 
-        status = ttk.Label(
-            self.root,
-            textvariable=self.status_var,
-            anchor="w",
-            padding=(5, 2)
-        )
-        status.pack(fill=tk.X, side=tk.BOTTOM)
-
     def _build_param_panel(self):
         pf = self.param_frame
 
@@ -378,17 +355,8 @@ class FlaxSeedApp:
 
         ttk.Separator(pf, orient="horizontal").pack(fill="x", pady=4)
 
-        ttk.Label(pf, text="Порог:").pack(anchor="w", padx=4, pady=(4, 0))
-
-        combo = ttk.Combobox(
-            pf,
-            textvariable=self.vars["thresh_mode"],
-            values=["Otsu", "Adaptive"],
-            state="readonly",
-            width=18
-        )
-        combo.pack(fill=tk.X, padx=4)
-        ToolTip(combo, TOOLTIPS.get("thresh_mode", ""))
+        # Порог теперь фиксированный — только Otsu.
+        ttk.Label(pf, text="Порог: Otsu").pack(anchor="w", padx=4, pady=(4, 0))
 
         checks = [
             ("Оценивать ширину границы", "estimate_edge"),
@@ -479,7 +447,6 @@ class FlaxSeedApp:
             params[key] = var.get()
 
         params["blur_kernel"] = ensure_odd(params["blur_kernel"], 1)
-        params["block_size"] = ensure_odd(params["block_size"], 3)
 
         if int(params["max_area"]) <= int(params["min_area"]):
             params["max_area"] = int(params["min_area"]) + 100
@@ -525,10 +492,8 @@ class FlaxSeedApp:
 
     def _clamp_scale(self, scale, img):
         h, w = img.shape[:2]
-
         max_scale_by_dim = self.MAX_DISPLAY_DIM / float(max(w, h))
         max_scale = min(self.MAX_SCALE, max_scale_by_dim)
-
         return max(self.MIN_SCALE, min(max_scale, float(scale)))
 
     def _scroll_size(self):
@@ -576,7 +541,6 @@ class FlaxSeedApp:
             return
 
         h, w = img.shape[:2]
-
         cw = max(1, self.canvas.winfo_width())
         ch = max(1, self.canvas.winfo_height())
 
@@ -643,10 +607,9 @@ class FlaxSeedApp:
 
         self.display_scale = new_scale
         self.fit_mode = "manual"
-
         self._redraw_view()
-        self.canvas.update_idletasks()
 
+        self.canvas.update_idletasks()
         self._scroll_to_image_point(img_x, img_y, vx, vy)
 
     def _scroll_to_image_point(self, img_x, img_y, viewport_x, viewport_y):
@@ -854,7 +817,6 @@ class FlaxSeedApp:
 
         h, w = self.original_bgr.shape[:2]
         pad = max(0, int(self.vars["padding"].get()))
-
         saved = 0
 
         for i, item in enumerate(items, 1):
