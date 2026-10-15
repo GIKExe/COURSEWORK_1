@@ -1,16 +1,19 @@
 """
 Обработчики изображения:
-чтение/запись с поддержкой кириллицы;
-сегментация;
-фильтрация объектов;
-оценка фокуса;
-замеры семян;
-статистика размеров;
-экспорт параметров в CSV.
+- чтение/запись с поддержкой кириллицы;
+- сегментация;
+- фильтрация объектов;
+- оценка фокуса;
+- замеры семян;
+- статистика размеров;
+- обновление параметров в CSV;
+- сохранение контуров семян в JSON.
 """
 
 import os
+import re
 import csv
+import json
 
 import cv2
 import numpy as np
@@ -30,6 +33,27 @@ STATUS_NAMES_RU = {
     "unknown": "неизвестно",
 }
 
+DEFAULT_CSV_FIELDS = [
+    "file_index",
+    "index",
+    "status",
+    "edge_width_px",
+    "length_px",
+    "width_px",
+    "angle_deg",
+    "area_px",
+    "length_mm",
+    "width_mm",
+    "mm_per_px",
+]
+
+# Старые/нежелательные поля, которые не нужно тащить в обновлённый CSV.
+SKIP_LEGACY_FIELDS = {
+    "filename",
+    "source_path",
+    "path",
+}
+
 
 # ------------------------------------------------------------
 # Ввод/вывод
@@ -41,7 +65,7 @@ def imread_unicode(path):
     return cv2.imdecode(data, cv2.IMREAD_COLOR)
 
 
-def imwrite_unicode(path, img):
+def imwrite_unicode(path, img, params=None):
     """Сохраняет изображение, включая пути с кириллицей."""
     ext = os.path.splitext(path)[1]
 
@@ -49,7 +73,14 @@ def imwrite_unicode(path, img):
         ext = ".png"
         path += ext
 
-    ok, buf = cv2.imencode(ext, img)
+    if params is None:
+        if ext.lower() in (".jpg", ".jpeg"):
+            params = [int(cv2.IMWRITE_JPEG_QUALITY), 95]
+        else:
+            params = []
+
+    ok, buf = cv2.imencode(ext, img, params)
+
     if ok:
         buf.tofile(path)
         return True
@@ -79,60 +110,265 @@ def ensure_odd(value, min_value=1):
     return value
 
 
-def write_items_csv(path, items, mm_per_px=None):
+def sanitize_filename(name):
     """
-    Сохраняет параметры семян в CSV.
-    Используется utf-8-sig, чтобы файл корректно открывался в Excel.
+    Делает имя файла/префикс безопасным для Windows/Linux.
+    Используется для формирования имён вида:
+        2_1_001.jpg
+        2_1_001_contour.json
     """
-    fieldnames = [
-        # "filename",
-        "index",
-        "status",
-        # "status_ru",
-        "edge_width_px",
-        # "bbox_x",
-        # "bbox_y",
-        # "bbox_w",
-        # "bbox_h",
-        # "center_x",
-        # "center_y",
-        "length_px",
-        "width_px",
-        "angle_deg",
-        "area_px",
-        # "solidity",
-        # "extent",
-        # "compactness",
-        # "contrast",
-        "length_mm",
-        "width_mm",
-        "mm_per_px",
-    ]
+    name = os.path.basename(str(name))
+    name = re.sub(r'[\\/:*?"<>|\s]+', "_", name)
+    name = name.strip("._ ")
 
-    k = None
-    if mm_per_px is not None:
+    if not name:
+        name = "image"
+
+    return name
+
+
+def fmt_float(value, digits=3):
+    """
+    Форматирует число для CSV.
+    None/NaN/Infinity/ошибки -> пустая строка.
+    """
+    if value is None:
+        return ""
+
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return ""
+
+    if not np.isfinite(value):
+        return ""
+
+    return f"{value:.{digits}f}"
+
+
+def contour_to_points(contour, offset_x=0, offset_y=0):
+    """
+    Преобразует контур OpenCV в список точек [[x, y], ...].
+    Можно сразу сместить координаты на offset_x/offset_y.
+    """
+    if contour is None:
+        return []
+
+    try:
+        pts = contour.reshape(-1, 2)
+    except Exception:
+        return []
+
+    out = []
+
+    for p in pts:
         try:
-            k = float(mm_per_px)
-            if not np.isfinite(k) or k <= 0:
-                k = None
-        except (TypeError, ValueError):
-            k = None
+            x = int(p[0]) - int(offset_x)
+            y = int(p[1]) - int(offset_y)
+            out.append([x, y])
+        except Exception:
+            pass
 
-    def fmt(value, digits=3):
-        if value is None:
-            return ""
+    return out
 
+
+def save_contour_json(
+    path,
+    file_index,
+    seed_index,
+    contour,
+    crop_origin,
+    crop_shape,
+    bbox=None,
+    padding=0,
+    source_name=None,
+):
+    """
+    Сохраняет точки криволинейной границы семени в JSON.
+
+    points даны в координатах сохранённого crop-изображения (JPG).
+    Чтобы получить координаты в исходном фото, нужно прибавить
+    crop_origin_in_source.
+    """
+    crop_h, crop_w = crop_shape[:2]
+    ox, oy = crop_origin
+
+    points = contour_to_points(contour, offset_x=ox, offset_y=oy)
+
+    payload = {
+        "file_index": file_index,
+        "index": int(seed_index),
+        "points_space": "crop",
+        "image_width": int(crop_w),
+        "image_height": int(crop_h),
+        "crop_origin_in_source": [int(ox), int(oy)],
+        "padding": int(padding),
+        "points": points,
+    }
+
+    if bbox is not None:
         try:
-            value = float(value)
-        except (TypeError, ValueError):
-            return ""
+            bx, by, bw, bh = bbox
+            payload["bbox_in_source"] = [int(bx), int(by), int(bw), int(bh)]
+        except Exception:
+            pass
 
-        if not np.isfinite(value):
-            return ""
-
-        return f"{value:.{digits}f}"
+    if source_name:
+        payload["source_name"] = source_name
 
     out_dir = os.path.dirname(path)
+
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=None)
+
+
+def remove_group_files_except(dir_path, group_prefix, keep_file_indexes):
+    """
+    Удаляет старые файлы группы (исходного изображения), которых нет
+    в новом результате.
+
+    Группа определяется по префиксу:
+        <group_prefix>_<digits>.jpg
+        <group_prefix>_<digits>.png
+        <group_prefix>_<digits>_contour.json
+
+    keep_file_indexes:
+        список/множество file_index, которые нужно оставить,
+        например ["2_1_001", "2_1_002"]
+    """
+    if not group_prefix or not os.path.isdir(dir_path):
+        return
+
+    keep = set(str(x) for x in keep_file_indexes)
+
+    img_pattern = re.compile(
+        r"^" + re.escape(group_prefix) + r"_(\d+)\.(jpe?g|png)$",
+        re.IGNORECASE
+    )
+
+    json_pattern = re.compile(
+        r"^" + re.escape(group_prefix) + r"_(\d+)_contour\.json$",
+        re.IGNORECASE
+    )
+
+    for name in os.listdir(dir_path):
+        file_index = None
+        remove = False
+
+        m = img_pattern.match(name)
+        if m:
+            digits = m.group(1)
+            ext = m.group(2).lower()
+            file_index = f"{group_prefix}_{digits}"
+
+            # Новый формат хранения — JPG.
+            # Старые PNG/JPEG той же группы удаляем всегда.
+            if ext != "jpg":
+                remove = True
+            elif file_index not in keep:
+                remove = True
+        else:
+            m = json_pattern.match(name)
+            if m:
+                digits = m.group(1)
+                file_index = f"{group_prefix}_{digits}"
+
+                if file_index not in keep:
+                    remove = True
+
+        if remove:
+            try:
+                os.remove(os.path.join(dir_path, name))
+            except Exception:
+                pass
+
+
+def update_seeds_csv(path, new_rows, group_prefix):
+    """
+    Обновляет out/seeds.csv.
+
+    Логика:
+    - читает существующий CSV, если он есть;
+    - удаляет строки, у которых file_index относится к текущему файлу:
+      <group_prefix>_<digits>;
+    - добавляет новые строки текущего файла;
+    - сохраняет CSV в utf-8-sig.
+
+    Так достигается:
+    - добавление данных для новых фотографий;
+    - замена данных при повторной обработке той же фотографии.
+    """
+    existing_rows = []
+    existing_fields = []
+
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8-sig", newline="") as f:
+                sample = f.read(8192)
+                f.seek(0)
+
+                try:
+                    dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
+                except Exception:
+                    dialect = csv.excel
+
+                reader = csv.DictReader(f, dialect=dialect)
+                existing_fields = list(reader.fieldnames or [])
+
+                for row in reader:
+                    clean_row = {}
+
+                    for key, value in row.items():
+                        if key is None:
+                            continue
+                        clean_row[key] = "" if value is None else value
+
+                    existing_rows.append(clean_row)
+
+        except Exception:
+            existing_rows = []
+            existing_fields = []
+
+    # Удаляем старые строки текущего исходного файла.
+    group_pattern = re.compile(r"^" + re.escape(group_prefix) + r"_\d+$")
+
+    kept_rows = []
+
+    for row in existing_rows:
+        file_index = str(row.get("file_index", "")).strip()
+
+        if file_index and group_pattern.match(file_index):
+            continue
+
+        kept_rows.append(row)
+
+    # Собираем итоговые поля.
+    fieldnames = []
+
+    for name in DEFAULT_CSV_FIELDS:
+        if name not in fieldnames:
+            fieldnames.append(name)
+
+    for name in existing_fields:
+        if name in SKIP_LEGACY_FIELDS:
+            continue
+
+        if name not in fieldnames:
+            fieldnames.append(name)
+
+    for row in new_rows:
+        for name in row.keys():
+            if name in SKIP_LEGACY_FIELDS:
+                continue
+
+            if name not in fieldnames:
+                fieldnames.append(name)
+
+    out_dir = os.path.dirname(path)
+
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
@@ -140,47 +376,10 @@ def write_items_csv(path, items, mm_per_px=None):
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
 
-        for idx, item in enumerate(items, 1):
-            bbox = item.get("bbox", (0, 0, 0, 0))
+        for row in kept_rows:
+            writer.writerow(row)
 
-            try:
-                x, y, w, h = bbox
-                x = int(x)
-                y = int(y)
-                w = int(w)
-                h = int(h)
-            except Exception:
-                x = y = w = h = 0
-
-            length_px = item.get("length_px", None)
-            width_px = item.get("width_px", None)
-            status = str(item.get("status", "unknown"))
-
-            row = {
-                "filename": item.get("filename", f"{idx:03d}.png"),
-                "index": item.get("saved_index", idx),
-                "status": status,
-                "status_ru": STATUS_NAMES_RU.get(status, status),
-                "edge_width_px": fmt(item.get("edge_width"), 3),
-                "bbox_x": x,
-                "bbox_y": y,
-                "bbox_w": w,
-                "bbox_h": h,
-                "center_x": fmt(item.get("center_x"), 3),
-                "center_y": fmt(item.get("center_y"), 3),
-                "length_px": fmt(length_px, 3),
-                "width_px": fmt(width_px, 3),
-                "angle_deg": fmt(item.get("angle_deg", item.get("angle", None)), 3),
-                "area_px": fmt(item.get("area"), 1),
-                "solidity": fmt(item.get("solidity"), 4),
-                "extent": fmt(item.get("extent"), 4),
-                "compactness": fmt(item.get("compactness"), 4),
-                "contrast": fmt(item.get("contrast"), 2),
-                "length_mm": fmt(float(length_px) * k, 4) if (length_px is not None and k is not None) else "",
-                "width_mm": fmt(float(width_px) * k, 4) if (width_px is not None and k is not None) else "",
-                "mm_per_px": fmt(k, 8) if k is not None else "",
-            }
-
+        for row in new_rows:
             writer.writerow(row)
 
 
@@ -194,7 +393,6 @@ def make_mask(gray, params):
     Используется только глобальный порог Otsu.
     """
     k = ensure_odd(params["blur_kernel"], 1)
-
     blurred = cv2.GaussianBlur(gray, (k, k), 0)
 
     _, mask = cv2.threshold(
@@ -216,6 +414,7 @@ def make_mask(gray, params):
 
         if mean_white < mean_black or white_count > mask.size * 0.6:
             mask = cv2.bitwise_not(mask)
+
     elif white_count == mask.size:
         # Если всё стало белым, маска почти наверняка испорчена.
         mask = np.zeros_like(mask)
@@ -270,8 +469,8 @@ def object_contrast(gray, contour, bbox):
     Примитивная оценка контраста объекта относительно локального фона.
     """
     x, y, w, h = bbox
-    img_h, img_w = gray.shape[:2]
 
+    img_h, img_w = gray.shape[:2]
     pad = max(6, min(20, int(min(w, h) * 0.25)))
 
     x0 = max(0, x - pad)
@@ -301,6 +500,7 @@ def object_contrast(gray, contour, bbox):
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
 
     inner = cv2.erode(mask, kernel, iterations=1)
+
     if cv2.countNonZero(inner) < 3:
         inner = mask
 
@@ -404,16 +604,18 @@ def estimate_edge_width(gray, contour, bbox, max_points=160):
     norms = np.linalg.norm(tangents, axis=1)
 
     valid = norms > 1e-3
+
     if int(valid.sum()) < 12:
         return None
 
     pts = pts[valid]
     tangents = tangents[valid] / norms[valid, None]
+
     normals = np.column_stack((-tangents[:, 1], tangents[:, 0]))
 
     img_h, img_w = gray.shape[:2]
-
     min_dim = max(3, min(w, h))
+
     check_offset = float(np.clip(min_dim * 0.20, 2.0, 5.0))
 
     def mean_at(offset):
@@ -444,6 +646,7 @@ def estimate_edge_width(gray, contour, bbox, max_points=160):
     profile = np.array([mean_at(outward * d) for d in distances], dtype=np.float32)
 
     good = ~np.isnan(profile)
+
     if int(good.sum()) < max(6, len(distances) // 2):
         return None
 
@@ -595,6 +798,7 @@ def process_image(img_bgr, params):
     img_h, img_w = gray.shape[:2]
 
     raw_candidates = []
+
     MIN_COMPACTNESS = 0.08
 
     for cnt in contours:
@@ -616,6 +820,7 @@ def process_image(img_bgr, params):
             continue
 
         ratio = float(max(bw, bh)) / float(max(1, min(bw, bh)))
+
         if ratio < min_ratio or ratio > max_ratio:
             continue
 
@@ -629,10 +834,12 @@ def process_image(img_bgr, params):
             continue
 
         perimeter = cv2.arcLength(cnt, True)
+
         if perimeter <= 0:
             continue
 
         compactness = (4.0 * np.pi * area) / (perimeter * perimeter)
+
         if compactness < MIN_COMPACTNESS:
             continue
 
@@ -674,6 +881,7 @@ def process_image(img_bgr, params):
         box = cv2.boxPoints(rect)
 
         side_a, side_b = rect[1]
+
         length_px = float(max(side_a, side_b))
         width_px = float(min(side_a, side_b))
 
@@ -686,7 +894,11 @@ def process_image(img_bgr, params):
 
         major_edge = edge1 if len1 >= len2 else edge2
 
-        if np.isfinite(major_edge[0]) and np.isfinite(major_edge[1]) and np.linalg.norm(major_edge) > 1e-6:
+        if (
+            np.isfinite(major_edge[0])
+            and np.isfinite(major_edge[1])
+            and np.linalg.norm(major_edge) > 1e-6
+        ):
             angle_deg = float(np.degrees(np.arctan2(major_edge[1], major_edge[0]))) % 180.0
         else:
             angle_deg = 0.0
@@ -695,9 +907,11 @@ def process_image(img_bgr, params):
         cand["box"] = box
         cand["center_x"] = float(rect[0][0])
         cand["center_y"] = float(rect[0][1])
+
         cand["length_px"] = length_px
         cand["width_px"] = width_px
         cand["angle_deg"] = angle_deg
+
         cand["edge_width"] = edge_width
         cand["status"] = status
 
@@ -707,10 +921,16 @@ def process_image(img_bgr, params):
     # а затем сортируются слева направо внутри каждой строки.
     items = sort_items_reading_order(items)
 
+    # Проставляем стабильный номер семечки на фото.
+    for i, item in enumerate(items, 1):
+        item["index"] = i
+
     annotated = img_bgr.copy()
     mm_per_px = params.get("mm_per_px")
 
-    for i, item in enumerate(items, 1):
+    for item in items:
+        i = item["index"]
+
         x, y, bw, bh = item["bbox"]
         color = STATUS_COLORS.get(item["status"], (255, 255, 255))
 

@@ -14,7 +14,11 @@ from utils import (
     process_image,
     compute_size_stats,
     format_size_stats,
-    write_items_csv,
+    update_seeds_csv,
+    save_contour_json,
+    sanitize_filename,
+    remove_group_files_except,
+    fmt_float,
 )
 from ruler import calibrate_ruler
 
@@ -23,6 +27,7 @@ RESAMPLE = Image.Resampling.LANCZOS
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_OUT_DIR = os.path.join(BASE_DIR, "out")
+
 
 TOOLTIPS = {
     "blur_kernel": (
@@ -300,6 +305,7 @@ class FlaxSeedApp:
             "<Configure>",
             lambda e: left_canvas.configure(scrollregion=left_canvas.bbox("all"))
         )
+
         left_canvas.bind(
             "<Configure>",
             lambda e, wid=win_id: left_canvas.itemconfigure(wid, width=e.width)
@@ -498,10 +504,8 @@ class FlaxSeedApp:
 
     def _clamp_scale(self, scale, img):
         h, w = img.shape[:2]
-
         max_scale_by_dim = self.MAX_DISPLAY_DIM / float(max(w, h))
         max_scale = min(self.MAX_SCALE, max_scale_by_dim)
-
         return max(self.MIN_SCALE, min(max_scale, float(scale)))
 
     def _scroll_size(self):
@@ -520,6 +524,7 @@ class FlaxSeedApp:
         self.canvas.delete("all")
 
         img = self._current_image()
+
         if img is None:
             self.zoom_label.config(text="100%")
             return
@@ -545,6 +550,7 @@ class FlaxSeedApp:
 
     def _apply_fit(self):
         img = self._current_image()
+
         if img is None:
             return
 
@@ -580,6 +586,7 @@ class FlaxSeedApp:
             return
 
         size = (event.width, event.height)
+
         if size == self._last_canvas_size:
             return
 
@@ -590,6 +597,7 @@ class FlaxSeedApp:
 
     def _zoom_factor(self, factor, event=None):
         img = self._current_image()
+
         if img is None:
             return
 
@@ -649,6 +657,7 @@ class FlaxSeedApp:
 
     def zoom_actual(self):
         img = self._current_image()
+
         if img is None:
             return
 
@@ -708,6 +717,7 @@ class FlaxSeedApp:
             return
 
         img = imread_unicode(path)
+
         if img is None:
             messagebox.showerror("Ошибка", "Не удалось прочитать изображение.")
             return
@@ -755,6 +765,7 @@ class FlaxSeedApp:
                 f"Найдено: {len(self.seed_items)}; "
                 f"фокус: {n_focus}; размыто: {n_blur}; неизвестно: {n_unknown}."
             )
+
         except Exception as exc:
             messagebox.showerror("Ошибка обработки", str(exc))
             self.status_var.set("Ошибка обработки.")
@@ -768,9 +779,8 @@ class FlaxSeedApp:
         self.root.update_idletasks()
 
         try:
-            mm_per_px = calibrate_ruler(self.original_bgr, debug=True)
+            mm_per_px = calibrate_ruler(self.original_bgr, debug=False)
             self.mm_per_px_var.set(f"{mm_per_px:.6f}")
-
             self.status_var.set(
                 f"Калибровка выполнена: {mm_per_px:.6f} мм/px "
                 f"({1.0 / mm_per_px:.2f} px/mm)."
@@ -832,13 +842,47 @@ class FlaxSeedApp:
             messagebox.showerror("Ошибка", f"Не удалось создать папку out: {exc}")
             return
 
+        if self.image_path:
+            source_name = sanitize_filename(
+                os.path.splitext(os.path.basename(self.image_path))[0]
+            )
+        else:
+            source_name = "image"
+
         h, w = self.original_bgr.shape[:2]
         pad = max(0, int(self.vars["padding"].get()))
 
         saved = 0
-        saved_items = []
+        contour_errors = 0
 
-        for i, item in enumerate(items, 1):
+        saved_rows = []
+        saved_file_indexes = []
+
+        # На всякий случай сортируем по номеру семечки на фото.
+        def sort_key(it):
+            try:
+                return int(it.get("index", 0))
+            except Exception:
+                return 0
+
+        items = sorted(items, key=sort_key)
+
+        used_indices = set()
+
+        for item in items:
+            try:
+                seed_index = int(item.get("index", 0))
+            except Exception:
+                seed_index = 0
+
+            if seed_index <= 0:
+                seed_index = max(used_indices) + 1 if used_indices else 1
+
+            while seed_index in used_indices:
+                seed_index += 1
+
+            used_indices.add(seed_index)
+
             x, y, bw, bh = item["bbox"]
 
             x1 = max(0, x - pad)
@@ -847,33 +891,92 @@ class FlaxSeedApp:
             y2 = min(h, y + bh + pad)
 
             crop = self.original_bgr[y1:y2, x1:x2]
+
             if crop.size == 0:
                 continue
 
-            filename = f"{i:03d}.png"
+            file_index = f"{source_name}_{seed_index:03d}"
+            filename = f"{file_index}.jpg"
             full_path = os.path.join(out_dir, filename)
 
-            if not imwrite_unicode(full_path, crop):
+            if not imwrite_unicode(
+                full_path,
+                crop,
+                [int(cv2.IMWRITE_JPEG_QUALITY), 95]
+            ):
                 continue
 
-            saved += 1
+            contour_path = os.path.join(out_dir, f"{file_index}_contour.json")
 
-            row_item = dict(item)
-            row_item["filename"] = filename
-            row_item["saved_index"] = i
-            saved_items.append(row_item)
+            try:
+                save_contour_json(
+                    path=contour_path,
+                    file_index=file_index,
+                    seed_index=seed_index,
+                    contour=item.get("contour"),
+                    crop_origin=(x1, y1),
+                    crop_shape=crop.shape,
+                    bbox=(x, y, bw, bh),
+                    padding=pad,
+                    source_name=source_name,
+                )
+            except Exception:
+                contour_errors += 1
+
+            saved += 1
+            saved_file_indexes.append(file_index)
+
+            length_px = item.get("length_px", None)
+            width_px = item.get("width_px", None)
+
+            row = {
+                "file_index": file_index,
+                "index": seed_index,
+                "status": str(item.get("status", "unknown")),
+                "edge_width_px": fmt_float(item.get("edge_width"), 3),
+                "length_px": fmt_float(length_px, 3),
+                "width_px": fmt_float(width_px, 3),
+                "angle_deg": fmt_float(item.get("angle_deg", item.get("angle", None)), 3),
+                "area_px": fmt_float(item.get("area"), 1),
+                "length_mm": (
+                    fmt_float(float(length_px) * mm_per_px, 4)
+                    if (length_px is not None and mm_per_px is not None)
+                    else ""
+                ),
+                "width_mm": (
+                    fmt_float(float(width_px) * mm_per_px, 4)
+                    if (width_px is not None and mm_per_px is not None)
+                    else ""
+                ),
+                "mm_per_px": fmt_float(mm_per_px, 8) if mm_per_px is not None else "",
+            }
+
+            saved_rows.append(row)
+
+        # Удаляем старые файлы этого исходного изображения,
+        # которых больше нет в новом результате.
+        try:
+            remove_group_files_except(out_dir, source_name, saved_file_indexes)
+        except Exception:
+            pass
 
         csv_path = os.path.join(out_dir, "seeds.csv")
 
         try:
-            write_items_csv(csv_path, saved_items, mm_per_px=mm_per_px)
+            update_seeds_csv(csv_path, saved_rows, source_name)
         except Exception as exc:
             messagebox.showerror("Ошибка CSV", f"Не удалось сохранить CSV: {exc}")
             return
 
-        self.status_var.set(
-            f"Сохранено {saved} из {len(items)} фрагментов и seeds.csv в: {out_dir}"
+        msg = (
+            f"Сохранено {saved} из {len(items)} фрагментов "
+            f"для '{source_name}' в: {out_dir}"
         )
+
+        if contour_errors:
+            msg += f", ошибки сохранения контуров: {contour_errors}"
+
+        self.status_var.set(msg)
 
     def save_result_image(self):
         if self.result_bgr is None:
