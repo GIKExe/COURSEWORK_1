@@ -4,7 +4,7 @@
 """
 Seed Inspector — приложение для просмотра и ручной проверки параметров семечек.
 
-Поддерживает новый формат данных:
+Поддерживает формат данных:
     out/
         2_1_001.jpg
         2_1_001_contour.json
@@ -19,10 +19,12 @@ Seed Inspector — приложение для просмотра и ручно�
 Дополнительно редактируются и сохраняются:
     thickness_mm, mass_g, shape
 
-Отображение:
+Возможности:
 - изображение семечки можно увеличивать/уменьшать вручную;
 - слева рисуется миллиметровая линейка по mm_per_px;
-- поверх изображения рисуется контур из *_contour.json.
+- контур отображается поверх изображения;
+- точки контура можно перетаскивать, добавлять и удалять;
+- исправленный контур сохраняется обратно в *_contour.json.
 """
 
 import os
@@ -106,8 +108,10 @@ MAX_ZOOM = 32.0
 # Ограничение авто-увеличения очень маленьких картинок,
 # чтобы не было чрезмерного "мыла".
 MAX_FIT_SCALE = 12.0
-
 FIT_PADDING = 26
+
+POINT_HANDLE_RADIUS = 5
+POINT_HIT_RADIUS = 9
 
 
 # =========================
@@ -209,7 +213,7 @@ class SeedInspectorApp:
         self.output_path = None
 
         # dirty — изменения текущей формы ещё не перенесены в records
-        # unsaved — есть изменения, которые ещё не сохранены в CSV
+        # unsaved — есть изменения CSV, которые ещё не сохранены в файл
         self.dirty = False
         self.unsaved = False
 
@@ -219,11 +223,9 @@ class SeedInspectorApp:
         self.status_options = []
 
         self._font_cache = None
-        self._contour_cache = {}
 
         # Состояние отображения изображения
         self.base_image = None
-        self.contour_points = None
         self.display_scale = 1.0
 
         # zoom_mode:
@@ -233,6 +235,18 @@ class SeedInspectorApp:
         self.zoom_factor = 1.0
 
         self._last_canvas_size = (0, 0)
+
+        # Контур и его редактирование
+        self.contour_points = []
+        self.contour_path = None
+        self.contour_meta = {}
+        self.contour_dirty = False
+
+        self.drag_point_index = None
+        self.pan_active = False
+
+        self.contour_line_items = []
+        self.contour_point_items = []
 
         self._load_data()
         self._build_ui()
@@ -325,7 +339,7 @@ class SeedInspectorApp:
 
     def _build_ui(self):
         self.root.title(APP_TITLE)
-        self.root.geometry("1320x820")
+        self.root.geometry("1360x840")
         self.root.minsize(1050, 650)
 
         # Строка состояния снизу.
@@ -387,6 +401,13 @@ class SeedInspectorApp:
         self.zoom_lbl = ttk.Label(top, text="100%", width=6, anchor="center")
         self.zoom_lbl.pack(side=tk.LEFT)
 
+        # Кнопки сохранения справа.
+        ttk.Button(
+            top,
+            text="Сохранить контур",
+            command=lambda: self._save_contour(show_message=True)
+        ).pack(side=tk.RIGHT, padx=(6, 0))
+
         ttk.Button(
             top,
             text="Сохранить как...",
@@ -405,7 +426,7 @@ class SeedInspectorApp:
 
         img_frame = ttk.LabelFrame(
             main,
-            text="Изображение (Ctrl + колесо — масштаб, ЛКМ — перемещение)",
+            text="Изображение (Ctrl + колесо — масштаб, ЛКМ по пустому месту — перемещение)",
             padding=6
         )
         main.add(img_frame, weight=3)
@@ -440,9 +461,13 @@ class SeedInspectorApp:
         self.canvas.bind("<Button-4>", self._on_mousewheel)
         self.canvas.bind("<Button-5>", self._on_mousewheel)
 
-        # Панорамирование левой кнопкой мыши
-        self.canvas.bind("<ButtonPress-1>", lambda event: self.canvas.scan_mark(event.x, event.y))
-        self.canvas.bind("<B1-Motion>", lambda event: self.canvas.scan_dragto(event.x, event.y, gain=1))
+        # Интерактивное редактирование контура + панорамирование
+        self.canvas.bind("<ButtonPress-1>", self._on_canvas_left_press)
+        self.canvas.bind("<B1-Motion>", self._on_canvas_left_motion)
+        self.canvas.bind("<ButtonRelease-1>", self._on_canvas_left_release)
+
+        self.canvas.bind("<Double-Button-1>", self._on_canvas_double_click)
+        self.canvas.bind("<Button-3>", self._on_canvas_right_click)
 
         params_frame = ttk.LabelFrame(
             main,
@@ -453,8 +478,9 @@ class SeedInspectorApp:
 
         hint_text = (
             "Новые поля: thickness_mm, mass_g, shape.\n"
-            "Стрелки ←/→ — переключение, Ctrl+S — сохранение.\n"
-            "Контур берётся из файла <file_index>_contour.json."
+            "Стрелки ←/→ — переключение, Ctrl+S — сохранение CSV.\n"
+            "Контур: ЛКМ по точке — перетащить; двойной клик — добавить точку;\n"
+            "ПКМ по точке — удалить точку. Изменения сохраняются в *_contour.json."
         )
 
         hint = ttk.Label(
@@ -642,6 +668,9 @@ class SeedInspectorApp:
         if not self.records:
             return
 
+        if self.contour_dirty:
+            self._save_contour(show_message=False)
+
         # Если пользователь менял текущую запись, сначала переносим изменения
         # в память и проверяем числовые поля.
         if self.dirty and not self._save_current(strict=True):
@@ -656,6 +685,9 @@ class SeedInspectorApp:
     def _on_goto(self, event=None):
         if not self.records:
             return
+
+        if self.contour_dirty:
+            self._save_contour(show_message=False)
 
         if self.dirty and not self._save_current(strict=True):
             return
@@ -780,9 +812,19 @@ class SeedInspectorApp:
     # =========================
 
     def _load_current_media(self):
+        self.contour_path = None
+        self.contour_meta = {}
+        self.contour_points = []
+        self.contour_dirty = False
+
+        self.drag_point_index = None
+        self.pan_active = False
+
+        self.contour_line_items = []
+        self.contour_point_items = []
+
         if not self.records:
             self.base_image = None
-            self.contour_points = None
             return
 
         record = self.records[self.current]
@@ -792,13 +834,43 @@ class SeedInspectorApp:
             if image_path and os.path.isfile(image_path):
                 img = Image.open(image_path).convert("RGB")
                 self.base_image = img
-                self.contour_points = self._load_contour_points(record, image_path)
+
+                file_index = self._get_contour_file_index(record, image_path)
+                self.contour_path = self._get_contour_path(file_index)
+
+                if self.contour_path and os.path.isfile(self.contour_path):
+                    try:
+                        with open(self.contour_path, "r", encoding="utf-8") as fh:
+                            data = json.load(fh)
+
+                        if isinstance(data, dict):
+                            self.contour_meta = data
+                            raw_points = data.get("points", [])
+                        elif isinstance(data, list):
+                            self.contour_meta = {"points": data}
+                            raw_points = data
+                        else:
+                            self.contour_meta = {}
+                            raw_points = []
+
+                        self.contour_points = self._parse_raw_points(raw_points)
+
+                    except Exception:
+                        self.contour_meta = {}
+                        self.contour_points = []
+                else:
+                    self.contour_meta = {}
+                    self.contour_points = []
             else:
                 self.base_image = self._make_placeholder_image(record)
-                self.contour_points = None
+                self.contour_path = None
+                self.contour_meta = {}
+                self.contour_points = []
         except Exception:
             self.base_image = self._make_placeholder_image(record)
-            self.contour_points = None
+            self.contour_path = None
+            self.contour_meta = {}
+            self.contour_points = []
 
     def _find_image_path(self, record):
         """
@@ -867,13 +939,7 @@ class SeedInspectorApp:
 
         return None
 
-    def _load_contour_points(self, record, image_path):
-        """
-        Загружает точки контура из файла:
-            <file_index>_contour.json
-
-        Если file_index отсутствует, пробуем взять имя изображения без расширения.
-        """
+    def _get_contour_file_index(self, record, image_path):
         file_index = str(record.get("file_index", "")).strip()
 
         if not file_index and image_path:
@@ -885,59 +951,46 @@ class SeedInspectorApp:
         if file_index.lower().endswith(IMAGE_EXTENSIONS):
             file_index = os.path.splitext(file_index)[0]
 
-        cache_key = file_index
+        return file_index
 
-        if cache_key in self._contour_cache:
-            return self._contour_cache[cache_key]
+    def _get_contour_path(self, file_index):
+        if not file_index:
+            return None
 
         contour_name = f"{file_index}_contour.json"
         actual_name = self.json_files.get(contour_name.lower())
 
-        points = None
-
         if actual_name:
-            contour_path = os.path.join(OUT_DIR, actual_name)
+            return os.path.join(OUT_DIR, actual_name)
 
+        return os.path.join(OUT_DIR, contour_name)
+
+    def _parse_raw_points(self, raw_points):
+        parsed = []
+
+        if not isinstance(raw_points, (list, tuple)):
+            return parsed
+
+        for point in raw_points:
             try:
-                with open(contour_path, "r", encoding="utf-8") as fh:
-                    data = json.load(fh)
-
-                if isinstance(data, dict):
-                    raw_points = data.get("points", [])
-                elif isinstance(data, list):
-                    raw_points = data
+                if isinstance(point, dict):
+                    x = point.get("x")
+                    y = point.get("y")
+                elif isinstance(point, (list, tuple)) and len(point) >= 2:
+                    x = point[0]
+                    y = point[1]
                 else:
-                    raw_points = []
+                    continue
 
-                parsed = []
+                x = float(x)
+                y = float(y)
 
-                for point in raw_points:
-                    try:
-                        if isinstance(point, dict):
-                            x = point.get("x")
-                            y = point.get("y")
-                        elif isinstance(point, (list, tuple)) and len(point) >= 2:
-                            x = point[0]
-                            y = point[1]
-                        else:
-                            continue
-
-                        x = float(x)
-                        y = float(y)
-
-                        if math.isfinite(x) and math.isfinite(y):
-                            parsed.append((x, y))
-                    except Exception:
-                        continue
-
-                if parsed:
-                    points = parsed
-
+                if math.isfinite(x) and math.isfinite(y):
+                    parsed.append((x, y))
             except Exception:
-                points = None
+                continue
 
-        self._contour_cache[cache_key] = points
-        return points
+        return parsed
 
     def _make_placeholder_image(self, record):
         file_index = str(record.get("file_index", "")) or str(record.get("index", "")) or str(self.current + 1)
@@ -1063,6 +1116,9 @@ class SeedInspectorApp:
     def _render_image(self):
         self.canvas.delete("all")
 
+        self.contour_line_items = []
+        self.contour_point_items = []
+
         if self.base_image is None:
             self.zoom_lbl.config(text="100%")
             return
@@ -1082,10 +1138,6 @@ class SeedInspectorApp:
         img = self.base_image.resize((disp_w, disp_h), RESAMPLE)
         draw = ImageDraw.Draw(img)
 
-        # Сначала контур, затем линейку, чтобы линейка была поверх.
-        if self.contour_points:
-            self._draw_contour(draw, self.contour_points, scale)
-
         record = {}
         length_override = None
         width_override = None
@@ -1104,54 +1156,426 @@ class SeedInspectorApp:
         )
 
         self.photo = ImageTk.PhotoImage(img)
-        self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
-        self.canvas.configure(scrollregion=(0, 0, disp_w, disp_h))
+        self.canvas.create_image(0, 0, anchor="nw", image=self.photo, tags="base_image")
 
+        self._draw_contour_overlay()
+
+        self.canvas.configure(scrollregion=(0, 0, disp_w, disp_h))
         self.zoom_lbl.config(text=f"{int(round(scale * 100))}%")
 
-    def _draw_contour(self, draw, points, scale):
-        if not points:
+    def _draw_contour_overlay(self):
+        self.contour_line_items = []
+        self.contour_point_items = []
+
+        if not self.contour_points or self.display_scale <= 0:
             return
 
-        pts = []
+        scale = self.display_scale
 
-        for x, y in points:
-            try:
-                xx = float(x) * scale
-                yy = float(y) * scale
+        # Линия контура.
+        if len(self.contour_points) >= 2:
+            coords = []
 
-                if not math.isfinite(xx) or not math.isfinite(yy):
-                    continue
+            for x, y in self.contour_points:
+                coords.extend([x * scale, y * scale])
 
-                pts.append((int(round(xx)), int(round(yy))))
-            except Exception:
-                continue
+            # Замыкаем контур, если точек больше двух.
+            if len(self.contour_points) > 2:
+                x0, y0 = self.contour_points[0]
+                coords.extend([x0 * scale, y0 * scale])
 
-        if not pts:
-            return
+            black_line = self.canvas.create_line(
+                coords,
+                fill="#000000",
+                width=4,
+                tags=("contour", "contour_line")
+            )
 
-        # Контурная линия с чёрной обводкой для лучшей видимости.
-        if len(pts) > 1:
-            closed = pts + [pts[0]]
-            draw.line(closed, fill=(0, 0, 0), width=4)
-            draw.line(closed, fill=(0, 255, 0), width=2)
+            green_line = self.canvas.create_line(
+                coords,
+                fill="#00ff00",
+                width=2,
+                tags=("contour", "contour_line")
+            )
+
+            self.contour_line_items = [black_line, green_line]
 
         # Точки контура.
-        # Если точек очень много, рисуем каждую N-ю, чтобы не тормозить.
-        if len(pts) > 2000:
-            step = max(1, len(pts) // 2000)
-            point_list = pts[::step]
-        else:
-            point_list = pts
+        r = POINT_HANDLE_RADIUS
 
-        radius = 2 if scale >= 1.5 else 1
+        for i, (x, y) in enumerate(self.contour_points):
+            sx = x * scale
+            sy = y * scale
 
-        for x, y in point_list:
-            draw.ellipse(
-                [x - radius, y - radius, x + radius, y + radius],
-                outline=(0, 0, 0),
-                fill=(255, 255, 0)
+            item = self.canvas.create_oval(
+                sx - r,
+                sy - r,
+                sx + r,
+                sy + r,
+                outline="#000000",
+                fill="#ffff00",
+                width=1,
+                tags=("contour", "contour_pt", f"pt:{i}")
             )
+
+            self.contour_point_items.append(item)
+
+    def _refresh_contour_line(self):
+        if not self.contour_line_items or not self.contour_points:
+            return
+
+        scale = self.display_scale
+        coords = []
+
+        for x, y in self.contour_points:
+            coords.extend([x * scale, y * scale])
+
+        if len(self.contour_points) > 2:
+            x0, y0 = self.contour_points[0]
+            coords.extend([x0 * scale, y0 * scale])
+
+        for item in self.contour_line_items:
+            try:
+                self.canvas.coords(item, *coords)
+            except Exception:
+                pass
+
+    def _update_point_visual(self, index):
+        if index < 0 or index >= len(self.contour_point_items):
+            return
+
+        if index >= len(self.contour_points):
+            return
+
+        item = self.contour_point_items[index]
+        x, y = self.contour_points[index]
+
+        sx = x * self.display_scale
+        sy = y * self.display_scale
+        r = POINT_HANDLE_RADIUS
+
+        try:
+            self.canvas.coords(item, sx - r, sy - r, sx + r, sy + r)
+        except Exception:
+            pass
+
+        self._refresh_contour_line()
+
+    # =========================
+    # Интерактивное редактирование контура
+    # =========================
+
+    def _event_to_image_coords(self, event):
+        if self.base_image is None or self.display_scale <= 0:
+            return None, None
+
+        cx = self.canvas.canvasx(event.x)
+        cy = self.canvas.canvasy(event.y)
+
+        x = cx / self.display_scale
+        y = cy / self.display_scale
+
+        w, h = self.base_image.size
+
+        x = max(0.0, min(float(w - 1), float(x)))
+        y = max(0.0, min(float(h - 1), float(y)))
+
+        return x, y
+
+    def _find_point_item_at(self, event):
+        cx = self.canvas.canvasx(event.x)
+        cy = self.canvas.canvasy(event.y)
+
+        r = POINT_HIT_RADIUS
+
+        items = self.canvas.find_overlapping(cx - r, cy - r, cx + r, cy + r)
+
+        best_item = None
+        best_dist = None
+
+        for item in items:
+            tags = self.canvas.gettags(item)
+
+            if "contour_pt" not in tags:
+                continue
+
+            coords = self.canvas.coords(item)
+
+            if len(coords) != 4:
+                continue
+
+            center_x = (coords[0] + coords[2]) / 2.0
+            center_y = (coords[1] + coords[3]) / 2.0
+
+            dist = math.hypot(center_x - cx, center_y - cy)
+
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                best_item = item
+
+        return best_item
+
+    def _point_index_from_item(self, item):
+        tags = self.canvas.gettags(item)
+
+        for tag in tags:
+            if tag.startswith("pt:"):
+                try:
+                    return int(tag.split(":", 1)[1])
+                except Exception:
+                    return None
+
+        return None
+
+    def _on_canvas_left_press(self, event):
+        if self.base_image is None:
+            return
+
+        item = self._find_point_item_at(event)
+
+        if item is not None:
+            index = self._point_index_from_item(item)
+
+            if index is not None and 0 <= index < len(self.contour_points):
+                self.drag_point_index = index
+                return
+
+        # Если точка не найдена — начинаем панорамирование.
+        self.pan_active = True
+        self.canvas.scan_mark(event.x, event.y)
+
+    def _on_canvas_left_motion(self, event):
+        if self.drag_point_index is not None:
+            x, y = self._event_to_image_coords(event)
+
+            if x is None or y is None:
+                return
+
+            index = self.drag_point_index
+
+            if 0 <= index < len(self.contour_points):
+                self.contour_points[index] = (x, y)
+                self.contour_dirty = True
+                self._update_point_visual(index)
+
+        elif self.pan_active:
+            self.canvas.scan_dragto(event.x, event.y, gain=1)
+
+    def _on_canvas_left_release(self, event):
+        if self.drag_point_index is not None:
+            self.drag_point_index = None
+
+            if self.contour_dirty:
+                self._save_contour(show_message=False)
+
+        self.pan_active = False
+
+    def _on_canvas_double_click(self, event):
+        """
+        Двойной клик — добавить точку контура.
+        """
+        if self.base_image is None:
+            return
+
+        if self.contour_path is None:
+            messagebox.showwarning(
+                "Контур",
+                "Нет имени файла для контура.\n"
+                "Нужно поле file_index или имя изображения."
+            )
+            return
+
+        # Если двойной клик попал в существующую точку, не добавляем новую.
+        if self._find_point_item_at(event) is not None:
+            return
+
+        x, y = self._event_to_image_coords(event)
+
+        if x is None or y is None:
+            return
+
+        insert_index = self._find_insert_index(x, y)
+        self.contour_points.insert(insert_index, (x, y))
+
+        self.contour_dirty = True
+        self._draw_contour_overlay()
+        self._save_contour(show_message=False)
+
+    def _on_canvas_right_click(self, event):
+        """
+        ПКМ по точке — удалить точку контура.
+        """
+        if self.base_image is None:
+            return
+
+        item = self._find_point_item_at(event)
+
+        if item is None:
+            return
+
+        index = self._point_index_from_item(item)
+
+        if index is not None and 0 <= index < len(self.contour_points):
+            del self.contour_points[index]
+
+            self.contour_dirty = True
+            self._draw_contour_overlay()
+            self._save_contour(show_message=False)
+
+    def _find_insert_index(self, x, y):
+        n = len(self.contour_points)
+
+        if n == 0:
+            return 0
+
+        if n == 1:
+            return 1
+
+        segments = []
+
+        if n == 2:
+            segments.append((0, 1))
+        else:
+            for i in range(n):
+                segments.append((i, (i + 1) % n))
+
+        best_i = None
+        best_dist = None
+
+        for i, j in segments:
+            x1, y1 = self.contour_points[i]
+            x2, y2 = self.contour_points[j]
+
+            dist = self._point_segment_distance(x, y, x1, y1, x2, y2)
+
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                best_i = i
+
+        if best_i is None:
+            return n
+
+        return best_i + 1
+
+    @staticmethod
+    def _point_segment_distance(px, py, x1, y1, x2, y2):
+        dx = x2 - x1
+        dy = y2 - y1
+
+        length_sq = dx * dx + dy * dy
+
+        if length_sq <= 1e-12:
+            return math.hypot(px - x1, py - y1)
+
+        t = ((px - x1) * dx + (py - y1) * dy) / length_sq
+        t = max(0.0, min(1.0, t))
+
+        proj_x = x1 + t * dx
+        proj_y = y1 + t * dy
+
+        return math.hypot(px - proj_x, py - proj_y)
+
+    # =========================
+    # Сохранение контура
+    # =========================
+
+    def _save_contour(self, show_message=False):
+        if self.contour_path is None:
+            if show_message:
+                messagebox.showwarning(
+                    "Сохранение контура",
+                    "Нет файла контура для сохранения."
+                )
+            return False
+
+        if self.base_image is None:
+            if show_message:
+                messagebox.showwarning(
+                    "Сохранение контура",
+                    "Нет изображения для сохранения контура."
+                )
+            return False
+
+        try:
+            payload = dict(self.contour_meta) if isinstance(self.contour_meta, dict) else {}
+
+            record = self.records[self.current] if self.records else {}
+
+            file_index = str(record.get("file_index", "")).strip()
+
+            if not file_index:
+                base = os.path.basename(self.contour_path)
+
+                if base.lower().endswith("_contour.json"):
+                    file_index = base[:-len("_contour.json")]
+                else:
+                    file_index = os.path.splitext(base)[0]
+
+            payload["file_index"] = file_index
+
+            if str(record.get("index", "")).strip() != "":
+                payload["index"] = record.get("index", "")
+            elif "index" not in payload:
+                payload["index"] = ""
+
+            payload["points_space"] = payload.get("points_space", "crop")
+
+            w, h = self.base_image.size
+            payload["image_width"] = int(w)
+            payload["image_height"] = int(h)
+
+            points = []
+
+            for x, y in self.contour_points:
+                try:
+                    xi = int(round(float(x)))
+                    yi = int(round(float(y)))
+                    points.append([xi, yi])
+                except Exception:
+                    continue
+
+            payload["points"] = points
+
+            out_dir = os.path.dirname(self.contour_path)
+
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
+
+            with open(self.contour_path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False, indent=2)
+
+            self.json_files[os.path.basename(self.contour_path).lower()] = os.path.basename(self.contour_path)
+
+            self.contour_dirty = False
+
+            if show_message:
+                messagebox.showinfo(
+                    "Сохранение контура",
+                    f"Контур сохранён:\n{self.contour_path}"
+                )
+            else:
+                self.statusbar.config(
+                    text=f"Контур сохранён: {os.path.basename(self.contour_path)}"
+                )
+
+            return True
+
+        except Exception as exc:
+            if show_message:
+                messagebox.showerror(
+                    "Ошибка сохранения контура",
+                    f"Не удалось сохранить контур:\n{exc}"
+                )
+            else:
+                self.statusbar.config(
+                    text=f"Ошибка сохранения контура: {exc}"
+                )
+
+            return False
+
+    # =========================
+    # Линейка
+    # =========================
 
     def _get_font(self):
         if self._font_cache is not None:
@@ -1209,6 +1633,7 @@ class SeedInspectorApp:
         """
         Рисует вертикальную миллиметровую линейку слева.
         Длина линейки старается соответствовать длине семечки.
+        Без фона, красным цветом.
         """
         width, height = img.size
 
@@ -1264,24 +1689,12 @@ class SeedInspectorApp:
         draw = ImageDraw.Draw(img)
         font = self._get_font()
 
+        RED = (255, 0, 0)
+
         label = f"{target_mm:.4g} мм"
 
-        try:
-            text_width = draw.textlength(label, font=font)
-        except Exception:
-            try:
-                text_width = draw.textlength(label)
-            except Exception:
-                text_width = len(label) * 8
-
-        x_line = 32
+        x_line = 24
         tick_len = 14
-
-        box_w = max(
-            92,
-            int(text_width) + 24,
-            x_line + tick_len + 48
-        )
 
         y0 = max(16, int((height - bar_px) / 2))
         y1 = y0 + int(bar_px)
@@ -1290,42 +1703,31 @@ class SeedInspectorApp:
             y1 = height - 16
             y0 = max(16, y1 - int(bar_px))
 
-        # Белая подложка, чтобы линейка была видна на любом фоне.
-        draw.rectangle(
-            [
-                8,
-                max(6, y0 - 28),
-                box_w,
-                min(height - 6, y1 + 24)
-            ],
-            fill=(255, 255, 255),
-            outline=(0, 0, 0)
-        )
+        # Текст без подложки.
+        text_y = max(4, y0 - 22)
 
-        draw.text(
-            (12, max(8, y0 - 24)),
-            label,
-            fill=(0, 0, 0),
-            font=font
-        )
+        if text_y < 4:
+            text_y = min(height - 20, y1 + 6)
+
+        draw.text((8, text_y), label, fill=RED, font=font)
 
         # Основная вертикальная линия.
         draw.line(
             [(x_line, y0), (x_line, y1)],
-            fill=(0, 0, 0),
+            fill=RED,
             width=3
         )
 
         # Верхняя и нижняя граница линейки.
         draw.line(
             [(x_line, y0), (x_line + tick_len + 4, y0)],
-            fill=(0, 0, 0),
+            fill=RED,
             width=3
         )
 
         draw.line(
             [(x_line, y1), (x_line + tick_len + 4, y1)],
-            fill=(0, 0, 0),
+            fill=RED,
             width=3
         )
 
@@ -1346,7 +1748,7 @@ class SeedInspectorApp:
 
                 draw.line(
                     [(x_line, yy), (x_line + tick_len, yy)],
-                    fill=(0, 0, 0),
+                    fill=RED,
                     width=2
                 )
 
@@ -1356,7 +1758,7 @@ class SeedInspectorApp:
                     draw.text(
                         (x_line + tick_len + 4, yy - 8),
                         tick_label,
-                        fill=(0, 0, 0),
+                        fill=RED,
                         font=font
                     )
 
@@ -1595,6 +1997,9 @@ class SeedInspectorApp:
         self.statusbar.config(text=text)
 
     def _on_close(self):
+        if self.contour_dirty:
+            self._save_contour(show_message=False)
+
         if self.unsaved:
             answer = messagebox.askyesnocancel(
                 "Выход",
