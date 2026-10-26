@@ -1,1 +1,1 @@
-el prino
+el primo
