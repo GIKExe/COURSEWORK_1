@@ -1,12 +1,11 @@
 import os
+import sys
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox
-
 import numpy as np
 import cv2
 from PIL import Image, ImageTk
-
 from utils import (
     imread_unicode,
     imwrite_unicode,
@@ -22,12 +21,9 @@ from utils import (
 )
 from ruler import calibrate_ruler
 
-
 RESAMPLE = Image.Resampling.LANCZOS
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_OUT_DIR = os.path.join(BASE_DIR, "out")
-
 
 TOOLTIPS = {
     "blur_kernel": (
@@ -104,15 +100,11 @@ def setup_dpi_awareness():
     """
     if os.name != "nt":
         return
-
     try:
         import ctypes
-
-        # Per-Monitor Aware (Windows 8.1+)
         try:
             ctypes.windll.shcore.SetProcessDpiAwareness(2)
         except Exception:
-            # Более старый вариант
             ctypes.windll.user32.SetProcessDPIAware()
     except Exception:
         pass
@@ -125,7 +117,6 @@ class ToolTip:
         self.widget = widget
         self.text = text
         self.tipwindow = None
-
         widget.bind("<Enter>", self.showtip, add="+")
         widget.bind("<Leave>", self.hidetip, add="+")
         widget.bind("<ButtonPress>", self.hidetip, add="+")
@@ -133,19 +124,15 @@ class ToolTip:
     def showtip(self, event=None):
         if self.tipwindow or not self.text:
             return
-
         x = self.widget.winfo_rootx() + 20
         y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5
-
         self.tipwindow = tw = tk.Toplevel(self.widget)
         tw.wm_overrideredirect(True)
         tw.wm_geometry(f"+{x}+{y}")
-
         try:
             tw.attributes("-topmost", True)
         except Exception:
             pass
-
         label = tk.Label(
             tw,
             text=self.text,
@@ -172,29 +159,23 @@ class FlaxSeedApp:
 
     def __init__(self, root):
         self.root = root
-
         self.original_bgr = None
         self.result_bgr = None
         self.seed_items = []
         self.image_path = None
         self.tk_image = None
-
-        self.current_view = "original"  # original / result
+        self.current_view = "original"
         self.display_scale = 1.0
-        self.fit_mode = "width"         # width / window / manual
+        self.fit_mode = "width"
         self._last_canvas_size = (0, 0)
-
         self.status_var = tk.StringVar(
             value="Откройте фото, подберите параметры и нажмите «Обработать»."
         )
-
         self._init_vars()
         self._build_ui()
 
     def _init_vars(self):
         self.vars = {}
-
-        # key, label, low, high, step, default, kind
         self.param_defs = [
             ("blur_kernel", "Размытие, ядро", 1, 31, 2, 21, "odd"),
             ("close_kernel", "Close, морфология", 1, 31, 1, 2, "int"),
@@ -210,7 +191,6 @@ class FlaxSeedApp:
             ("blur_edge_width", "Размыто: граница >=, px", 1.0, 25.0, 0.1, 6.0, "float"),
             ("padding", "Отступ при сохранении, px", 0, 50, 1, 25, "int"),
         ]
-
         self.param_kinds = {}
         self.param_titles = {}
         self.param_lows = {}
@@ -223,15 +203,12 @@ class FlaxSeedApp:
                 self.vars[key] = tk.DoubleVar(value=default)
             else:
                 self.vars[key] = tk.IntVar(value=default)
-
             self.param_kinds[key] = kind
             self.param_titles[key] = label
             self.param_lows[key] = low
             self.param_highs[key] = high
             self.param_steps[key] = step
 
-        # Масштаб (мм на пиксель) и текст статистики размеров — отдельно от self.vars,
-        # потому что мм/px вводится вручную и разбирается в get_params().
         self.mm_per_px_var = tk.StringVar(value="")
         self.stats_var = tk.StringVar(value="—")
 
@@ -257,11 +234,9 @@ class FlaxSeedApp:
             ("Сохранить нарезку", self.save_crops),
             ("Сохранить результат", self.save_result_image),
         ]
-
         for text, cmd in buttons:
             btn = ttk.Button(toolbar, text=text, command=cmd)
             btn.pack(side=tk.LEFT, padx=2)
-
             if text == "Калибровать линейку":
                 ToolTip(btn, TOOLTIPS.get("calibrate_ruler", ""))
 
@@ -274,7 +249,6 @@ class FlaxSeedApp:
             ("По ширине", self.zoom_fit_width),
             ("По окну", self.zoom_fit_window),
         ]
-
         for text, cmd in zoom_buttons:
             ttk.Button(toolbar, text=text, command=cmd).pack(side=tk.LEFT, padx=2)
 
@@ -294,23 +268,18 @@ class FlaxSeedApp:
 
         left_outer = ttk.Frame(main)
         left_outer.pack(side=tk.LEFT, fill=tk.Y)
-
         left_canvas = tk.Canvas(left_outer, width=370, highlightthickness=0)
         left_scroll = ttk.Scrollbar(left_outer, orient=tk.VERTICAL, command=left_canvas.yview)
-
         self.param_frame = ttk.Frame(left_canvas)
         win_id = left_canvas.create_window((0, 0), window=self.param_frame, anchor="nw")
-
         self.param_frame.bind(
             "<Configure>",
             lambda e: left_canvas.configure(scrollregion=left_canvas.bbox("all"))
         )
-
         left_canvas.bind(
             "<Configure>",
             lambda e, wid=win_id: left_canvas.itemconfigure(wid, width=e.width)
         )
-
         left_canvas.configure(yscrollcommand=left_scroll.set)
         left_canvas.pack(side=tk.LEFT, fill=tk.Y)
         left_scroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -324,36 +293,26 @@ class FlaxSeedApp:
 
         self.canvas = tk.Canvas(right, bg="#202020", highlightthickness=0)
         self.canvas.grid(row=0, column=0, sticky="nsew")
-
         vbar = ttk.Scrollbar(right, orient="vertical", command=self.canvas.yview)
         vbar.grid(row=0, column=1, sticky="ns")
-
         hbar = ttk.Scrollbar(right, orient="horizontal", command=self.canvas.xview)
         hbar.grid(row=1, column=0, sticky="ew")
-
         self.canvas.configure(yscrollcommand=vbar.set, xscrollcommand=hbar.set)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
 
-        # Зум: Ctrl + колесо
         self.canvas.bind("<Control-MouseWheel>", self._on_ctrl_mousewheel)
         self.canvas.bind("<Control-Button-4>", lambda e: self._zoom_factor(1.25, e))
         self.canvas.bind("<Control-Button-5>", lambda e: self._zoom_factor(0.8, e))
-
-        # Обычное колесо — прокрутка
         self.canvas.bind("<MouseWheel>", self._on_mousewheel)
         self.canvas.bind("<Button-4>", self._on_mousewheel)
         self.canvas.bind("<Button-5>", self._on_mousewheel)
-
-        # Панорамирование левой кнопкой мыши
         self.canvas.bind("<ButtonPress-1>", lambda e: self.canvas.scan_mark(e.x, e.y))
         self.canvas.bind("<B1-Motion>", lambda e: self.canvas.scan_dragto(e.x, e.y, gain=1))
 
     def _build_param_panel(self):
         pf = self.param_frame
 
-        # --- Масштаб и статистика размеров ---
         ttk.Label(pf, text="Масштаб, мм/px:").pack(anchor="w", padx=4, pady=(4, 0))
-
         mm_entry = ttk.Entry(pf, textvariable=self.mm_per_px_var, width=18)
         mm_entry.pack(fill=tk.X, padx=4)
         ToolTip(mm_entry, TOOLTIPS.get("mm_per_px", ""))
@@ -367,7 +326,6 @@ class FlaxSeedApp:
 
         ttk.Separator(pf, orient="horizontal").pack(fill="x", pady=4)
 
-        # Порог теперь фиксированный — только Otsu.
         ttk.Label(pf, text="Порог: Otsu").pack(anchor="w", padx=4, pady=(4, 0))
 
         checks = [
@@ -377,7 +335,6 @@ class FlaxSeedApp:
             ("Не сохранять красные", "skip_blurry"),
             ("Сохранять только сфокусированные", "save_only_focused"),
         ]
-
         for text, key in checks:
             cb = ttk.Checkbutton(pf, text=text, variable=self.vars[key])
             cb.pack(anchor="w", padx=4, pady=1)
@@ -388,11 +345,9 @@ class FlaxSeedApp:
         for key, label, low, high, step, default, kind in self.param_defs:
             frame = ttk.Frame(pf)
             frame.pack(fill=tk.X, padx=4, pady=2)
-
             lbl = ttk.Label(frame, text=self._format_param(key))
             lbl.pack(anchor="w")
             self.scale_value_labels[key] = lbl
-
             scale = ttk.Scale(
                 frame,
                 from_=low,
@@ -402,7 +357,6 @@ class FlaxSeedApp:
             )
             scale.pack(fill=tk.X)
             scale.set(self.vars[key].get())
-
             tooltip_text = TOOLTIPS.get(key, "")
             if tooltip_text:
                 ToolTip(lbl, tooltip_text)
@@ -411,11 +365,9 @@ class FlaxSeedApp:
     def _format_param(self, key):
         val = self.vars[key].get()
         step = self.param_steps.get(key, 1)
-
         if self.param_kinds.get(key) == "float":
             decimals = 2 if step < 0.1 else 1
             return f"{self.param_titles[key]}: {float(val):.{decimals}f}"
-
         return f"{self.param_titles[key]}: {int(round(float(val)))}"
 
     def _round_param(self, key, raw_value):
@@ -423,74 +375,52 @@ class FlaxSeedApp:
         low = self.param_lows[key]
         high = self.param_highs[key]
         step = self.param_steps[key]
-
         value = float(raw_value)
-
         if kind == "float":
             decimals = 2 if step < 0.1 else 1
             value = round(round(value / step) * step, decimals)
             return max(float(low), min(float(high), float(value)))
-
         value = int(round(value / step) * step)
         value = max(int(low), min(int(high), value))
-
         if kind == "odd" and value % 2 == 0:
             if value + 1 <= int(high):
                 value += 1
             else:
                 value -= 1
-
         if kind == "odd":
             value = max(int(low), value)
-
         return value
 
     def _on_scale(self, key, raw_value):
         value = self._round_param(key, raw_value)
         self.vars[key].set(value)
-
         if key in self.scale_value_labels:
             self.scale_value_labels[key].config(text=self._format_param(key))
 
     def get_params(self):
         params = {}
-
         for key, var in self.vars.items():
             params[key] = var.get()
-
         params["blur_kernel"] = ensure_odd(params["blur_kernel"], 1)
-
         if int(params["max_area"]) <= int(params["min_area"]):
             params["max_area"] = int(params["min_area"]) + 100
-
         if float(params["max_ratio"]) <= float(params["min_ratio"]):
             params["max_ratio"] = float(params["min_ratio"]) + 0.5
-
         if float(params["blur_edge_width"]) <= float(params["max_edge_width"]):
             params["blur_edge_width"] = float(params["max_edge_width"]) + 0.1
-
         params["mm_per_px"] = self._parse_mm_per_px()
-
         return params
 
     def _parse_mm_per_px(self):
-        """
-        Возвращает мм/px как float или None, если поле пустое.
-        Принимает и точку, и запятую.
-        """
         text = self.mm_per_px_var.get().strip().replace(",", ".")
-
         if not text:
             return None
-
         try:
             value = float(text)
         except ValueError:
             raise ValueError("Масштаб мм/px должен быть числом, например 0.025")
-
         if not np.isfinite(value) or value <= 0:
             raise ValueError("Масштаб мм/px должен быть положительным числом, например 0.025")
-
         return value
 
     # ------------------------------------------------------------
@@ -517,65 +447,50 @@ class FlaxSeedApp:
                     return int(parts[2]), int(parts[3])
         except Exception:
             pass
-
         return self.canvas.winfo_width(), self.canvas.winfo_height()
 
     def _redraw_view(self):
         self.canvas.delete("all")
-
         img = self._current_image()
-
         if img is None:
             self.zoom_label.config(text="100%")
             return
-
         h, w = img.shape[:2]
         scale = self._clamp_scale(self.display_scale, img)
         self.display_scale = scale
-
         new_w = max(1, int(round(w * scale)))
         new_h = max(1, int(round(h * scale)))
-
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(rgb)
-
         if new_w != w or new_h != h:
             pil_img = pil_img.resize((new_w, new_h), RESAMPLE)
-
         self.tk_image = ImageTk.PhotoImage(pil_img)
         self.canvas.create_image(0, 0, anchor="nw", image=self.tk_image)
         self.canvas.configure(scrollregion=(0, 0, new_w, new_h))
-
         self.zoom_label.config(text=f"{int(round(scale * 100))}%")
 
     def _apply_fit(self):
         img = self._current_image()
-
         if img is None:
             return
-
         h, w = img.shape[:2]
         cw = max(1, self.canvas.winfo_width())
         ch = max(1, self.canvas.winfo_height())
-
         if cw <= 2 or ch <= 2:
             self.display_scale = self._clamp_scale(1.0, img)
             self._redraw_view()
             return
-
         if self.fit_mode == "width":
             scale = cw / float(w)
         elif self.fit_mode == "window":
             scale = min(cw / float(w), ch / float(h))
         else:
             scale = self.display_scale
-
         self.display_scale = self._clamp_scale(scale, img)
         self._redraw_view()
 
     def _refresh_view_after_change(self):
         self.canvas.update_idletasks()
-
         if self.fit_mode in ("width", "window"):
             self._apply_fit()
         else:
@@ -584,65 +499,49 @@ class FlaxSeedApp:
     def _on_canvas_configure(self, event):
         if self._current_image() is None:
             return
-
         size = (event.width, event.height)
-
         if size == self._last_canvas_size:
             return
-
         self._last_canvas_size = size
-
         if self.fit_mode in ("width", "window"):
             self._apply_fit()
 
     def _zoom_factor(self, factor, event=None):
         img = self._current_image()
-
         if img is None:
             return
-
         old_scale = self.display_scale
         new_scale = old_scale * float(factor)
         new_scale = self._clamp_scale(new_scale, img)
-
         if abs(new_scale - old_scale) < 1e-6:
             return
-
         if event is not None:
             vx = event.x
             vy = event.y
         else:
             vx = max(1, self.canvas.winfo_width() // 2)
             vy = max(1, self.canvas.winfo_height() // 2)
-
         canvas_x = self.canvas.canvasx(vx)
         canvas_y = self.canvas.canvasy(vy)
-
         img_x = canvas_x / old_scale if old_scale > 0 else 0.0
         img_y = canvas_y / old_scale if old_scale > 0 else 0.0
-
         self.display_scale = new_scale
         self.fit_mode = "manual"
-
         self._redraw_view()
         self.canvas.update_idletasks()
-
         self._scroll_to_image_point(img_x, img_y, vx, vy)
 
     def _scroll_to_image_point(self, img_x, img_y, viewport_x, viewport_y):
         new_x = img_x * self.display_scale
         new_y = img_y * self.display_scale
-
         scroll_w, scroll_h = self._scroll_size()
         view_w = self.canvas.winfo_width()
         view_h = self.canvas.winfo_height()
-
         if scroll_w > view_w:
             frac = (new_x - viewport_x) / float(scroll_w)
             self.canvas.xview_moveto(max(0.0, min(1.0, frac)))
         else:
             self.canvas.xview_moveto(0.0)
-
         if scroll_h > view_h:
             frac = (new_y - viewport_y) / float(scroll_h)
             self.canvas.yview_moveto(max(0.0, min(1.0, frac)))
@@ -657,10 +556,8 @@ class FlaxSeedApp:
 
     def zoom_actual(self):
         img = self._current_image()
-
         if img is None:
             return
-
         self.fit_mode = "manual"
         self.display_scale = self._clamp_scale(1.0, img)
         self._redraw_view()
@@ -678,23 +575,17 @@ class FlaxSeedApp:
         self._zoom_factor(factor, event)
 
     def _on_mousewheel(self, event):
-        # Если нажат Ctrl, зум обработается отдельным биндом.
         if getattr(event, "state", 0) & 0x0004:
             return
-
         delta = 0
-
         if getattr(event, "delta", 0) != 0:
             delta = -1 if event.delta > 0 else 1
         elif getattr(event, "num", None) == 4:
             delta = -1
         elif getattr(event, "num", None) == 5:
             delta = 1
-
         if delta == 0:
             return
-
-        # Shift — горизонтальная прокрутка, иначе вертикальная.
         if getattr(event, "state", 0) & 0x0001:
             self.canvas.xview_scroll(delta, "units")
         else:
@@ -712,60 +603,45 @@ class FlaxSeedApp:
                 ("Все файлы", "*.*"),
             ]
         )
-
         if not path:
             return
-
         img = imread_unicode(path)
-
         if img is None:
             messagebox.showerror("Ошибка", "Не удалось прочитать изображение.")
             return
-
         self.image_path = path
         self.original_bgr = img
         self.result_bgr = None
         self.seed_items = []
         self.stats_var.set("—")
-
         self.current_view = "original"
         self.fit_mode = "width"
-
         h, w = img.shape[:2]
         self.status_var.set(f"Загружено: {os.path.basename(path)}, {w}x{h}.")
-
         self.canvas.after_idle(self._refresh_view_after_change)
 
     def process(self):
         if self.original_bgr is None:
             messagebox.showwarning("Нет изображения", "Сначала откройте фото.")
             return
-
         self.status_var.set("Обработка...")
         self.root.update_idletasks()
-
         try:
             params = self.get_params()
             result = process_image(self.original_bgr, params)
-
             self.result_bgr = result["annotated"]
             self.seed_items = result["items"]
             self.current_view = "result"
-
             stats = compute_size_stats(self.seed_items, params["mm_per_px"])
             self.stats_var.set(format_size_stats(stats))
-
             self.canvas.after_idle(self._refresh_view_after_change)
-
             n_focus = sum(1 for it in self.seed_items if it["status"] == "focused")
             n_blur = sum(1 for it in self.seed_items if it["status"] == "blurry")
             n_unknown = sum(1 for it in self.seed_items if it["status"] == "unknown")
-
             self.status_var.set(
                 f"Найдено: {len(self.seed_items)}; "
                 f"фокус: {n_focus}; размыто: {n_blur}; неизвестно: {n_unknown}."
             )
-
         except Exception as exc:
             messagebox.showerror("Ошибка обработки", str(exc))
             self.status_var.set("Ошибка обработки.")
@@ -774,10 +650,8 @@ class FlaxSeedApp:
         if self.original_bgr is None:
             messagebox.showwarning("Нет изображения", "Сначала откройте фото.")
             return
-
         self.status_var.set("Калибровка линейки...")
         self.root.update_idletasks()
-
         try:
             mm_per_px = calibrate_ruler(self.original_bgr, debug=False)
             self.mm_per_px_var.set(f"{mm_per_px:.6f}")
@@ -793,7 +667,6 @@ class FlaxSeedApp:
         if self.original_bgr is None:
             messagebox.showwarning("Нет изображения", "Сначала откройте фото.")
             return
-
         self.current_view = "original"
         self.canvas.after_idle(self._refresh_view_after_change)
 
@@ -801,7 +674,6 @@ class FlaxSeedApp:
         if self.result_bgr is None:
             messagebox.showwarning("Нет результата", "Сначала выполните обработку.")
             return
-
         self.current_view = "result"
         self.canvas.after_idle(self._refresh_view_after_change)
 
@@ -809,56 +681,44 @@ class FlaxSeedApp:
         if self.original_bgr is None:
             messagebox.showwarning("Нет изображения", "Сначала откройте фото.")
             return
-
         if not self.seed_items:
             messagebox.showwarning("Нет данных", "Нет обнаруженных семян для сохранения.")
             return
-
         items = self.seed_items
-
         if self.vars["save_only_focused"].get():
             items = [it for it in items if it["status"] == "focused"]
         elif self.vars["skip_blurry"].get():
             items = [it for it in items if it["status"] != "blurry"]
-
         if not items:
             messagebox.showwarning(
                 "Нет данных",
                 "Нет объектов для сохранения по текущим фильтрам."
             )
             return
-
         try:
             mm_per_px = self._parse_mm_per_px()
         except ValueError as exc:
             messagebox.showerror("Ошибка масштаба", str(exc))
             return
-
         out_dir = DEFAULT_OUT_DIR
-
         try:
             os.makedirs(out_dir, exist_ok=True)
         except Exception as exc:
             messagebox.showerror("Ошибка", f"Не удалось создать папку out: {exc}")
             return
-
         if self.image_path:
             source_name = sanitize_filename(
                 os.path.splitext(os.path.basename(self.image_path))[0]
             )
         else:
             source_name = "image"
-
         h, w = self.original_bgr.shape[:2]
         pad = max(0, int(self.vars["padding"].get()))
-
         saved = 0
         contour_errors = 0
-
         saved_rows = []
         saved_file_indexes = []
 
-        # На всякий случай сортируем по номеру семечки на фото.
         def sort_key(it):
             try:
                 return int(it.get("index", 0))
@@ -866,7 +726,6 @@ class FlaxSeedApp:
                 return 0
 
         items = sorted(items, key=sort_key)
-
         used_indices = set()
 
         for item in items:
@@ -874,40 +733,30 @@ class FlaxSeedApp:
                 seed_index = int(item.get("index", 0))
             except Exception:
                 seed_index = 0
-
             if seed_index <= 0:
                 seed_index = max(used_indices) + 1 if used_indices else 1
-
             while seed_index in used_indices:
                 seed_index += 1
-
             used_indices.add(seed_index)
 
             x, y, bw, bh = item["bbox"]
-
             x1 = max(0, x - pad)
             y1 = max(0, y - pad)
             x2 = min(w, x + bw + pad)
             y2 = min(h, y + bh + pad)
-
             crop = self.original_bgr[y1:y2, x1:x2]
-
             if crop.size == 0:
                 continue
-
             file_index = f"{source_name}_{seed_index:03d}"
             filename = f"{file_index}.jpg"
             full_path = os.path.join(out_dir, filename)
-
             if not imwrite_unicode(
                 full_path,
                 crop,
                 [int(cv2.IMWRITE_JPEG_QUALITY), 95]
             ):
                 continue
-
             contour_path = os.path.join(out_dir, f"{file_index}_contour.json")
-
             try:
                 save_contour_json(
                     path=contour_path,
@@ -922,13 +771,10 @@ class FlaxSeedApp:
                 )
             except Exception:
                 contour_errors += 1
-
             saved += 1
             saved_file_indexes.append(file_index)
-
             length_px = item.get("length_px", None)
             width_px = item.get("width_px", None)
-
             row = {
                 "file_index": file_index,
                 "index": seed_index,
@@ -950,18 +796,14 @@ class FlaxSeedApp:
                 ),
                 "mm_per_px": fmt_float(mm_per_px, 8) if mm_per_px is not None else "",
             }
-
             saved_rows.append(row)
 
-        # Удаляем старые файлы этого исходного изображения,
-        # которых больше нет в новом результате.
         try:
             remove_group_files_except(out_dir, source_name, saved_file_indexes)
         except Exception:
             pass
 
         csv_path = os.path.join(out_dir, "seeds.csv")
-
         try:
             update_seeds_csv(csv_path, saved_rows, source_name)
         except Exception as exc:
@@ -972,17 +814,14 @@ class FlaxSeedApp:
             f"Сохранено {saved} из {len(items)} фрагментов "
             f"для '{source_name}' в: {out_dir}"
         )
-
         if contour_errors:
             msg += f", ошибки сохранения контуров: {contour_errors}"
-
         self.status_var.set(msg)
 
     def save_result_image(self):
         if self.result_bgr is None:
             messagebox.showwarning("Нет результата", "Сначала выполните обработку.")
             return
-
         path = filedialog.asksaveasfilename(
             title="Сохранить результат",
             defaultextension=".png",
@@ -992,34 +831,280 @@ class FlaxSeedApp:
                 ("Все файлы", "*.*"),
             ],
         )
-
         if not path:
             return
-
         if imwrite_unicode(path, self.result_bgr):
             self.status_var.set(f"Результат сохранён: {path}")
         else:
             messagebox.showerror("Ошибка", "Не удалось сохранить результат.")
 
 
+# ============================================================
+# Пакетная обработка (без GUI)
+# ============================================================
+
+def collect_image_paths(args):
+    """
+    Собирает список .jpg файлов из переданных аргументов.
+    Каждый аргумент может быть файлом или папкой.
+    """
+    paths = []
+    for arg in args:
+        arg = os.path.abspath(arg)
+        if os.path.isfile(arg):
+            ext = os.path.splitext(arg)[1].lower()
+            if ext in (".jpg", ".jpeg"):
+                paths.append(arg)
+        elif os.path.isdir(arg):
+            for name in sorted(os.listdir(arg)):
+                ext = os.path.splitext(name)[1].lower()
+                if ext in (".jpg", ".jpeg"):
+                    paths.append(os.path.join(arg, name))
+        else:
+            print(f"[ПРЕДУПРЕЖДЕНИЕ] Путь не найден, пропущен: {arg}")
+    return paths
+
+
+def get_default_params():
+    """Параметры обработки по умолчанию (как в GUI)."""
+    return {
+        "blur_kernel": 21,
+        "close_kernel": 2,
+        "open_kernel": 5,
+        "min_area": 3000,
+        "max_area": 40000,
+        "min_ratio": 1.0,
+        "max_ratio": 4.5,
+        "min_solidity": 0.60,
+        "min_extent": 0.30,
+        "min_contrast": 40,
+        "max_edge_width": 3.9,
+        "blur_edge_width": 6.0,
+        "padding": 25,
+        "estimate_edge": True,
+        "filter_edge": False,
+        "filter_outliers": True,
+        "skip_blurry": True,
+        "save_only_focused": False,
+        "mm_per_px": None,
+    }
+
+
+def batch_process_file(image_path, params, out_dir):
+    """
+    Обрабатывает один файл в пакетном режиме:
+    1. Читает изображение.
+    2. Калибрует линейку (автоопределение мм/px).
+    3. Сегментирует и замеряет семена.
+    4. Сохраняет кропы, контуры и обновляет CSV.
+    """
+    img = imread_unicode(image_path)
+    if img is None:
+        print(f"[ОШИБКА] Не удалось прочитать: {image_path}")
+        return
+
+    source_name = sanitize_filename(
+        os.path.splitext(os.path.basename(image_path))[0]
+    )
+    h, w = img.shape[:2]
+    print(f"  Обработка: {os.path.basename(image_path)} ({w}x{h})")
+
+    # --- Калибровка линейки ---
+    mm_per_px = None
+    try:
+        mm_per_px = calibrate_ruler(img, debug=False)
+        print(f"    Калибровка: {mm_per_px:.6f} мм/px ({1.0/mm_per_px:.2f} px/mm)")
+    except Exception as exc:
+        print(f"    [ПРЕДУПРЕЖДЕНИЕ] Калибровка не удалась: {exc}")
+        print("    Продолжаю без масштаба (замеры в px).")
+
+    params = dict(params)
+    params["mm_per_px"] = mm_per_px
+
+    # --- Обработка изображения ---
+    try:
+        result = process_image(img, params)
+    except Exception as exc:
+        print(f"    [ОШИБКА] Обработка не удалась: {exc}")
+        return
+
+    items = result["items"]
+    print(f"    Найдено объектов: {len(items)}")
+
+    # --- Фильтрация при сохранении ---
+    save_items = items
+    if params["save_only_focused"]:
+        save_items = [it for it in save_items if it["status"] == "focused"]
+    elif params["skip_blurry"]:
+        save_items = [it for it in save_items if it["status"] != "blurry"]
+
+    if not save_items:
+        print("    Нет объектов для сохранения после фильтрации.")
+        return
+
+    # --- Сохранение кропов ---
+    pad = max(0, int(params["padding"]))
+    saved = 0
+    contour_errors = 0
+    saved_rows = []
+    saved_file_indexes = []
+
+    def sort_key(it):
+        try:
+            return int(it.get("index", 0))
+        except Exception:
+            return 0
+
+    save_items = sorted(save_items, key=sort_key)
+    used_indices = set()
+
+    for item in save_items:
+        try:
+            seed_index = int(item.get("index", 0))
+        except Exception:
+            seed_index = 0
+        if seed_index <= 0:
+            seed_index = max(used_indices) + 1 if used_indices else 1
+        while seed_index in used_indices:
+            seed_index += 1
+        used_indices.add(seed_index)
+
+        x, y, bw, bh = item["bbox"]
+        x1 = max(0, x - pad)
+        y1 = max(0, y - pad)
+        x2 = min(w, x + bw + pad)
+        y2 = min(h, y + bh + pad)
+        crop = img[y1:y2, x1:x2]
+        if crop.size == 0:
+            continue
+
+        file_index = f"{source_name}_{seed_index:03d}"
+        filename = f"{file_index}.jpg"
+        full_path = os.path.join(out_dir, filename)
+        if not imwrite_unicode(
+            full_path,
+            crop,
+            [int(cv2.IMWRITE_JPEG_QUALITY), 95]
+        ):
+            continue
+
+        contour_path = os.path.join(out_dir, f"{file_index}_contour.json")
+        try:
+            save_contour_json(
+                path=contour_path,
+                file_index=file_index,
+                seed_index=seed_index,
+                contour=item.get("contour"),
+                crop_origin=(x1, y1),
+                crop_shape=crop.shape,
+                bbox=(x, y, bw, bh),
+                padding=pad,
+                source_name=source_name,
+            )
+        except Exception:
+            contour_errors += 1
+
+        saved += 1
+        saved_file_indexes.append(file_index)
+
+        length_px = item.get("length_px", None)
+        width_px = item.get("width_px", None)
+        row = {
+            "file_index": file_index,
+            "index": seed_index,
+            "status": str(item.get("status", "unknown")),
+            "edge_width_px": fmt_float(item.get("edge_width"), 3),
+            "length_px": fmt_float(length_px, 3),
+            "width_px": fmt_float(width_px, 3),
+            "angle_deg": fmt_float(item.get("angle_deg", item.get("angle", None)), 3),
+            "area_px": fmt_float(item.get("area"), 1),
+            "length_mm": (
+                fmt_float(float(length_px) * mm_per_px, 4)
+                if (length_px is not None and mm_per_px is not None)
+                else ""
+            ),
+            "width_mm": (
+                fmt_float(float(width_px) * mm_per_px, 4)
+                if (width_px is not None and mm_per_px is not None)
+                else ""
+            ),
+            "mm_per_px": fmt_float(mm_per_px, 8) if mm_per_px is not None else "",
+        }
+        saved_rows.append(row)
+
+    # --- Удаление старых файлов группы ---
+    try:
+        remove_group_files_except(out_dir, source_name, saved_file_indexes)
+    except Exception:
+        pass
+
+    # --- Обновление CSV ---
+    csv_path = os.path.join(out_dir, "seeds.csv")
+    try:
+        update_seeds_csv(csv_path, saved_rows, source_name)
+    except Exception as exc:
+        print(f"    [ОШИБКА] Не удалось обновить CSV: {exc}")
+
+    n_focus = sum(1 for it in items if it["status"] == "focused")
+    n_blur = sum(1 for it in items if it["status"] == "blurry")
+    print(
+        f"    Сохранено: {saved} шт. | "
+        f"фокус: {n_focus}, размыто: {n_blur}, "
+        f"всего найдено: {len(items)}"
+    )
+    if contour_errors:
+        print(f"    Ошибки контуров: {contour_errors}")
+
+
+def batch_main(paths):
+    """
+    Точка входа для пакетной обработки.
+    Принимает список путей (файлы/папки), собирает .jpg и обрабатывает.
+    """
+    image_files = collect_image_paths(paths)
+    if not image_files:
+        print("Не найдено ни одного .jpg файла по указанным путям.")
+        sys.exit(1)
+
+    print(f"Найдено файлов для обработки: {len(image_files)}")
+    print(f"Папка результатов: {DEFAULT_OUT_DIR}")
+    print("-" * 60)
+
+    os.makedirs(DEFAULT_OUT_DIR, exist_ok=True)
+    params = get_default_params()
+
+    for i, image_path in enumerate(image_files, 1):
+        print(f"[{i}/{len(image_files)}]")
+        batch_process_file(image_path, params, DEFAULT_OUT_DIR)
+
+    print("-" * 60)
+    print(f"Пакетная обработка завершена. Результат в: {DEFAULT_OUT_DIR}")
+
+
+# ============================================================
+# Точка входа
+# ============================================================
+
 def main():
     setup_dpi_awareness()
 
-    root = tk.Tk()
+    # Если переданы аргументы командной строки — пакетный режим
+    if len(sys.argv) > 1:
+        batch_main(sys.argv[1:])
+        return
 
-    # Пытаемся сделать шрифты чёткими/масштабированными под DPI.
+    # Иначе — обычный GUI
+    root = tk.Tk()
     try:
         dpi = root.winfo_fpixels("1i")
         root.tk.call("tk", "scaling", dpi / 72.0)
     except Exception:
         pass
-
     try:
         base_font = tkfont.nametofont("TkDefaultFont")
         base_font.configure(size=10)
     except Exception:
         pass
-
     app = FlaxSeedApp(root)
     root.mainloop()
 
