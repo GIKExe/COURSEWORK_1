@@ -245,7 +245,7 @@ class FlaxSeedApp:
         self.stats_var = tk.StringVar(value="—")
 
     def _build_ui(self):
-        self.root.title("Выделение и нарезка семян льна")
+        self.root.title("Выделение и нарезка семян ячменя")
         self.root.geometry("1450x850")
 
         toolbar = ttk.Frame(self.root, padding=5)
