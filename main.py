@@ -3,10 +3,13 @@ import sys
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox
+
 import numpy as np
 import cv2
 from PIL import Image, ImageTk
+
 from utils import (
+    calibrate_ruler,
     imread_unicode,
     imwrite_unicode,
     ensure_odd,
@@ -19,7 +22,7 @@ from utils import (
     remove_group_files_except,
     fmt_float,
 )
-from ruler import calibrate_ruler
+
 
 RESAMPLE = Image.Resampling.LANCZOS
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
