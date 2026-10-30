@@ -12,10 +12,13 @@
 - сохранение контуров семян в JSON.
 """
 
+from typing import Any, Dict, List, Optional, Tuple
+
 import os
 import re
 import csv
 import json
+import math
 
 import cv2
 import numpy as np
@@ -1182,3 +1185,554 @@ def format_size_stats(stats):
         line("Длина", stats["length"]),
         line("Ширина", stats["width"]),
     ])
+    
+    
+# ============================================================
+# Вынесенные функции из main.py
+# ============================================================
+
+def get_param_definitions() -> Tuple[Tuple[str, str, float, float, float, Any, str], ...]:
+    """
+    Единый источник параметров обработки.
+
+    Формат:
+        (
+            ключ,
+            подпись для GUI,
+            минимальное значение,
+            максимальное значение,
+            шаг,
+            значение по умолчанию,
+            тип ("int", "float", "odd")
+        )
+    """
+    return (
+        ("blur_kernel", "Размытие, ядро", 1, 31, 2, 21, "odd"),
+        ("close_kernel", "Close, морфология", 1, 31, 1, 2, "int"),
+        ("open_kernel", "Open, морфология", 1, 31, 1, 5, "int"),
+        ("min_area", "Мин. площадь, px", 10, 100000, 10, 3000, "int"),
+        ("max_area", "Макс. площадь, px", 100, 300000, 100, 40000, "int"),
+        ("min_ratio", "Мин. вытянутость", 1.0, 10.0, 0.1, 1.0, "float"),
+        ("max_ratio", "Макс. вытянутость", 1.0, 15.0, 0.1, 4.5, "float"),
+        ("min_solidity", "Мин. solidity", 0.0, 1.0, 0.01, 0.60, "float"),
+        ("min_extent", "Мин. extent", 0.0, 1.0, 0.01, 0.30, "float"),
+        ("min_contrast", "Мин. контраст", 0, 100, 1, 40, "int"),
+        ("max_edge_width", "Фокус: граница <=, px", 0.5, 15.0, 0.1, 3.9, "float"),
+        ("blur_edge_width", "Размыто: граница >=, px", 1.0, 25.0, 0.1, 6.0, "float"),
+        ("padding", "Отступ при сохранении, px", 0, 50, 1, 25, "int"),
+    )
+
+
+def get_checkbox_definitions() -> Tuple[Tuple[str, str, bool], ...]:
+    """
+    Единый источник чекбоксов.
+
+    Формат:
+        (
+            подпись для GUI,
+            ключ параметра,
+            значение по умолчанию
+        )
+    """
+    return (
+        ("Оценивать ширину границы", "estimate_edge", True),
+        ("Оставлять только сфокусированные", "filter_edge", False),
+        ("Фильтровать выбросы по площади", "filter_outliers", True),
+        ("Не сохранять красные", "skip_blurry", True),
+        ("Сохранять только сфокусированные", "save_only_focused", False),
+    )
+
+
+def get_default_params() -> Dict[str, Any]:
+    """
+    Возвращает параметры по умолчанию.
+
+    Используется и в GUI, и в пакетной обработке,
+    чтобы не дублировать значения вручную.
+    """
+    params = {}
+
+    for key, _label, _low, _high, _step, default, _kind in get_param_definitions():
+        params[key] = default
+
+    for _text, key, default in get_checkbox_definitions():
+        params[key] = default
+
+    params["mm_per_px"] = None
+
+    return params
+
+
+def parse_mm_per_px_text(text: str) -> Optional[float]:
+    """
+    Парсит строку с мм/px.
+
+    Допустимы точка и запятая.
+    Пустая строка означает None (замеры в пикселях).
+    """
+    text = (text or "").strip().replace(",", ".")
+
+    if not text:
+        return None
+
+    try:
+        value = float(text)
+    except ValueError:
+        raise ValueError("Масштаб мм/px должен быть числом, например 0.025")
+
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("Масштаб мм/px должен быть положительным числом, например 0.025")
+
+    return value
+
+
+def round_param_value(value: Any, low: float, high: float, step: float, kind: str) -> Any:
+    """
+    Округляет значение параметра до допустимого шага и диапазона.
+
+    kind:
+        "int"   — целое число;
+        "odd"   — нечётное целое число;
+        "float" — дробное число.
+    """
+    value = float(value)
+    low_f = float(low)
+    high_f = float(high)
+    step_f = float(step)
+
+    if kind == "float":
+        if step_f <= 0:
+            return max(low_f, min(high_f, value))
+
+        decimals = 2 if step_f < 0.1 else 1
+        value = round(round(value / step_f) * step_f, decimals)
+        return max(low_f, min(high_f, float(value)))
+
+    low_i = int(low_f)
+    high_i = int(high_f)
+
+    if step_f <= 0:
+        value = int(round(value))
+    else:
+        value = int(round(value / step_f) * step_f)
+
+    value = max(low_i, min(high_i, value))
+
+    if kind == "odd" and value % 2 == 0:
+        if value + 1 <= high_i:
+            value += 1
+        else:
+            value -= 1
+
+        value = max(low_i, value)
+
+    return value
+
+
+def format_param_label(title: str, value: Any, kind: str, step: float) -> str:
+    """
+    Форматирует подпись параметра для GUI.
+    """
+    step_f = float(step)
+
+    if kind == "float":
+        decimals = 2 if step_f < 0.1 else 1
+        return f"{title}: {float(value):.{decimals}f}"
+
+    return f"{title}: {int(round(float(value)))}"
+
+
+def normalize_params(params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Приводит параметры к согласованному виду.
+
+    - делает ядро размытия нечётным;
+    - исправляет min/max area;
+    - исправляет min/max ratio;
+    - исправляет пороги фокуса/размытия.
+    """
+    params = {**get_default_params(), **(params or {})}
+
+    params["blur_kernel"] = ensure_odd(int(float(params["blur_kernel"])), 1)
+
+    if int(params["max_area"]) <= int(params["min_area"]):
+        params["max_area"] = int(params["min_area"]) + 100
+
+    if float(params["max_ratio"]) <= float(params["min_ratio"]):
+        params["max_ratio"] = float(params["min_ratio"]) + 0.5
+
+    if float(params["blur_edge_width"]) <= float(params["max_edge_width"]):
+        params["blur_edge_width"] = float(params["max_edge_width"]) + 0.1
+
+    return params
+
+
+def try_calibrate_ruler(image_bgr: Any) -> Tuple[Optional[float], Optional[str]]:
+    """
+    Безопасная обёртка для калибровки линейки.
+
+    Возвращает:
+        (mm_per_px, None) при успехе;
+        (None, текст ошибки) при ошибке.
+    """
+    try:
+        mm_per_px = calibrate_ruler(image_bgr, debug=False)
+
+        if mm_per_px is None:
+            return None, "Калибровка вернула пустое значение."
+
+        mm_per_px = float(mm_per_px)
+
+        if not math.isfinite(mm_per_px) or mm_per_px <= 0:
+            return None, "Калибровка вернула некорректный мм/px."
+
+        return mm_per_px, None
+
+    except Exception as exc:
+        return None, str(exc)
+
+
+def format_calibration_message(mm_per_px: float) -> str:
+    """
+    Единый формат сообщения о калибровке.
+    """
+    mm = float(mm_per_px)
+
+    if mm <= 0:
+        return "0.000000 мм/px"
+
+    return f"{mm:.6f} мм/px ({1.0 / mm:.2f} px/mm)"
+
+
+def count_seed_statuses(items: List[Dict[str, Any]]) -> Dict[str, int]:
+    """
+    Считает статусы семян.
+    """
+    items = list(items or [])
+
+    focused = sum(1 for it in items if it.get("status") == "focused")
+    blurry = sum(1 for it in items if it.get("status") == "blurry")
+    unknown = sum(1 for it in items if it.get("status") == "unknown")
+
+    return {
+        "total": len(items),
+        "focused": focused,
+        "blurry": blurry,
+        "unknown": unknown,
+    }
+
+
+def format_seed_status_message(counts: Dict[str, int]) -> str:
+    """
+    Форматирует строку статуса по количеству семян.
+    """
+    return (
+        f"Найдено: {counts.get('total', 0)}; "
+        f"фокус: {counts.get('focused', 0)}; "
+        f"размыто: {counts.get('blurry', 0)}; "
+        f"неизвестно: {counts.get('unknown', 0)}."
+    )
+
+
+def select_items_for_export(
+    items: List[Dict[str, Any]],
+    *,
+    save_only_focused: bool = False,
+    skip_blurry: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    Выбирает объекты для сохранения по флагам.
+
+    Если включён save_only_focused, skip_blurry игнорируется.
+    """
+    items = list(items or [])
+
+    if save_only_focused:
+        return [it for it in items if it.get("status") == "focused"]
+
+    if skip_blurry:
+        return [it for it in items if it.get("status") != "blurry"]
+
+    return items
+
+
+def assign_unique_seed_indices(
+    items: List[Dict[str, Any]],
+) -> List[Tuple[Dict[str, Any], int]]:
+    """
+    Сортирует объекты по индексу и назначает каждому уникальный индекс.
+
+    Возвращает список кортежей:
+        (item, seed_index)
+    """
+    def sort_key(item: Dict[str, Any]) -> int:
+        try:
+            return int(item.get("index", 0))
+        except Exception:
+            return 0
+
+    used_indices = set()
+    result = []
+
+    for item in sorted(items, key=sort_key):
+        try:
+            seed_index = int(item.get("index", 0))
+        except Exception:
+            seed_index = 0
+
+        if seed_index <= 0:
+            seed_index = max(used_indices) + 1 if used_indices else 1
+
+        while seed_index in used_indices:
+            seed_index += 1
+
+        used_indices.add(seed_index)
+        result.append((item, seed_index))
+
+    return result
+
+
+def compute_crop_box(
+    bbox: Tuple[int, int, int, int],
+    image_shape: Tuple[int, int, Any],
+    padding: int = 0,
+) -> Tuple[int, int, int, int]:
+    """
+    Вычисляет координаты кропа с отступом, не выходя за границы изображения.
+
+    Возвращает:
+        (x1, y1, x2, y2)
+    """
+    h, w = image_shape[:2]
+    x, y, bw, bh = map(int, bbox)
+
+    pad = max(0, int(padding))
+
+    x1 = max(0, x - pad)
+    y1 = max(0, y - pad)
+    x2 = min(int(w), x + bw + pad)
+    y2 = min(int(h), y + bh + pad)
+
+    return x1, y1, x2, y2
+
+
+def _px_to_mm(value_px: Any, mm_per_px: Optional[float], decimals: int = 4) -> str:
+    """
+    Безопасно переводит пиксели в мм и форматирует строку.
+    """
+    if value_px is None or mm_per_px is None:
+        return ""
+
+    try:
+        return fmt_float(float(value_px) * float(mm_per_px), decimals)
+    except (TypeError, ValueError):
+        return ""
+
+
+def build_seed_csv_row(
+    item: Dict[str, Any],
+    file_index: str,
+    seed_index: int,
+    mm_per_px: Optional[float],
+) -> Dict[str, Any]:
+    """
+    Собирает одну строку для seeds.csv.
+    """
+    length_px = item.get("length_px", None)
+    width_px = item.get("width_px", None)
+
+    return {
+        "file_index": file_index,
+        "index": seed_index,
+        "status": str(item.get("status", "unknown")),
+        "edge_width_px": fmt_float(item.get("edge_width"), 3),
+        "length_px": fmt_float(length_px, 3),
+        "width_px": fmt_float(width_px, 3),
+        "angle_deg": fmt_float(item.get("angle_deg", item.get("angle", None)), 3),
+        "area_px": fmt_float(item.get("area"), 1),
+        "length_mm": _px_to_mm(length_px, mm_per_px, 4),
+        "width_mm": _px_to_mm(width_px, mm_per_px, 4),
+        "mm_per_px": fmt_float(mm_per_px, 8) if mm_per_px is not None else "",
+    }
+
+
+def export_seed_items(
+    image_bgr: Any,
+    items: List[Dict[str, Any]],
+    out_dir: str,
+    source_name: str,
+    *,
+    padding: int = 0,
+    mm_per_px: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Единая функция экспорта семян:
+
+    - создаёт папку;
+    - сохраняет кропы;
+    - сохраняет контуры;
+    - удаляет старые файлы группы;
+    - обновляет seeds.csv.
+
+    Возвращает словарь:
+        {
+            "saved": int,
+            "selected": int,
+            "contour_errors": int,
+            "saved_file_indexes": list[str],
+            "csv_error": Optional[str],
+        }
+    """
+    items = list(items or [])
+
+    summary = {
+        "saved": 0,
+        "selected": len(items),
+        "contour_errors": 0,
+        "saved_file_indexes": [],
+        "csv_error": None,
+    }
+
+    if not items or image_bgr is None:
+        return summary
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    pad = max(0, int(padding))
+    saved_rows = []
+
+    for item, seed_index in assign_unique_seed_indices(items):
+        bbox = item.get("bbox")
+
+        if not bbox:
+            continue
+
+        try:
+            x1, y1, x2, y2 = compute_crop_box(bbox, image_bgr.shape, pad)
+        except Exception:
+            continue
+
+        crop = image_bgr[y1:y2, x1:x2]
+
+        if crop.size == 0:
+            continue
+
+        file_index = f"{source_name}_{seed_index:03d}"
+        filename = f"{file_index}.jpg"
+        full_path = os.path.join(out_dir, filename)
+
+        if not imwrite_unicode(
+            full_path,
+            crop,
+            [int(cv2.IMWRITE_JPEG_QUALITY), 95]
+        ):
+            continue
+
+        contour_path = os.path.join(out_dir, f"{file_index}_contour.json")
+
+        try:
+            save_contour_json(
+                path=contour_path,
+                file_index=file_index,
+                seed_index=seed_index,
+                contour=item.get("contour"),
+                crop_origin=(x1, y1),
+                crop_shape=crop.shape,
+                bbox=bbox,
+                padding=pad,
+                source_name=source_name,
+            )
+        except Exception:
+            summary["contour_errors"] += 1
+
+        summary["saved"] += 1
+        summary["saved_file_indexes"].append(file_index)
+
+        saved_rows.append(
+            build_seed_csv_row(
+                item=item,
+                file_index=file_index,
+                seed_index=seed_index,
+                mm_per_px=mm_per_px,
+            )
+        )
+
+    try:
+        remove_group_files_except(out_dir, source_name, summary["saved_file_indexes"])
+    except Exception:
+        pass
+
+    csv_path = os.path.join(out_dir, "seeds.csv")
+
+    try:
+        update_seeds_csv(csv_path, saved_rows, source_name)
+    except Exception as exc:
+        summary["csv_error"] = str(exc)
+
+    return summary
+
+
+def format_export_message(
+    saved: int,
+    selected: int,
+    source_name: str,
+    out_dir: str,
+    contour_errors: int = 0,
+) -> str:
+    """
+    Форматирует сообщение об экспорте.
+    """
+    msg = (
+        f"Сохранено {saved} из {selected} фрагментов "
+        f"для '{source_name}' в: {out_dir}"
+    )
+
+    if contour_errors:
+        msg += f", ошибки сохранения контуров: {contour_errors}"
+
+    return msg
+
+
+def clamp_display_scale(
+    scale: float,
+    width: int,
+    height: int,
+    min_scale: float,
+    max_scale: float,
+    max_display_dim: float,
+) -> float:
+    """
+    Ограничивает масштаб отображения изображения.
+    """
+    width = max(1, int(width))
+    height = max(1, int(height))
+
+    max_scale_by_dim = float(max_display_dim) / float(max(width, height))
+    max_allowed = min(float(max_scale), max_scale_by_dim)
+
+    return max(float(min_scale), min(max_allowed, float(scale)))
+
+
+def calculate_fit_scale(
+    width: float,
+    height: float,
+    viewport_width: float,
+    viewport_height: float,
+    mode: str,
+    current_scale: float = 1.0,
+) -> float:
+    """
+    Считает масштаб для режимов "по ширине", "по окну" или ручной режим.
+    """
+    width = max(1.0, float(width))
+    height = max(1.0, float(height))
+    viewport_width = max(1.0, float(viewport_width))
+    viewport_height = max(1.0, float(viewport_height))
+
+    if mode == "width":
+        return viewport_width / width
+
+    if mode == "window":
+        return min(viewport_width / width, viewport_height / height)
+
+    return float(current_scale)
