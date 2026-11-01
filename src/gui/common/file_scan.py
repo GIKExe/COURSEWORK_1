@@ -17,11 +17,11 @@ def scan_directory(folder: str) -> tuple[dict[str, str], dict[str, str]]:
         return images, jsons
     try:
         for name in os.listdir(folder):
-            low = name.lower()
-            if low.endswith(IMAGE_EXTENSIONS):
-                images[low] = name
-            elif low.endswith(".json"):
-                jsons[low] = name
-    except Exception:
+            name = name.lower()
+            if name.endswith(IMAGE_EXTENSIONS):
+                images[name.rsplit('.', 1)[0]] = name
+            elif name.endswith(".json"):
+                jsons[name.rsplit('.', 1)[0]] = name
+    except:
         pass
     return images, jsons

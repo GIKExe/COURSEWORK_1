@@ -283,7 +283,7 @@ class AugInspectionApp:
 
         self.current_contour_pts = None
         self.current_json_meta = {}
-        json_file = self.json_files.get(fi.lower())
+        json_file = self.json_files.get(fi)
         if json_file:
             try:
                 with open(os.path.join(self.data_dir, json_file), "r", encoding="utf-8") as f:
@@ -291,7 +291,7 @@ class AugInspectionApp:
                 pts = self.current_json_meta.get("points", [])
                 if pts:
                     self.current_contour_pts = np.array(pts, dtype=np.float32)
-            except Exception:
+            except:
                 pass
 
         aug_info = self.current_json_meta.get("aug", {})
@@ -303,11 +303,11 @@ class AugInspectionApp:
         else:
             self.aug_params_lbl.config(text="Оригинальный снимок")
 
-        img_name = self.image_files.get(fi.lower())
+        img_name = self.image_files.get(fi)
         if img_name:
             try:
                 self.zoom_widget.set_image(Image.open(os.path.join(self.data_dir, img_name)).convert("RGB"))
-            except Exception:
+            except:
                 self.zoom_widget.clear()
         else:
             self.zoom_widget.clear()

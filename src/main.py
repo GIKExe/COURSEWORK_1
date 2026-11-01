@@ -18,11 +18,12 @@ def _setup_tk_defaults(root: tk.Tk) -> None:
     try:
         dpi = root.winfo_fpixels("1i")
         root.tk.call("tk", "scaling", dpi / 72.0)
-    except Exception:
+    except:  # noqa: E722, S110
         pass
+
     try:
         tkfont.nametofont("TkDefaultFont").configure(size=10)
-    except Exception:
+    except:  # noqa: E722, S110
         pass
 
 
@@ -30,10 +31,10 @@ def run_gui(initial_screen: str = "segmentation") -> None:
     """Run the GUI loop, allowing screen switching via callbacks."""
     screen: str | None = initial_screen
     while screen:
+        next_screen: list[str | None] = [None]
         root = tk.Tk()
         _setup_tk_defaults(root)
-        next_screen: list[str | None] = [None]
-
+        
         def switch(target: str) -> None:
             nonlocal screen
             next_screen[0] = target
