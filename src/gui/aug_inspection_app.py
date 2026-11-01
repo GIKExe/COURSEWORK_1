@@ -14,6 +14,7 @@ from PIL import Image, ImageDraw
 from core.csv_utils import read_csv_robust
 from core.models import IMAGE_EXTENSIONS
 from gui.common.file_scan import scan_directory
+from gui.common.ruler import draw_mm_ruler
 from gui.common.zoomable import ZoomableCanvas
 
 CONTOUR_COLORS: dict[str, str] = {
@@ -316,56 +317,73 @@ class AugInspectionApp:
         self.zoom_lbl.config(text=f"{self.zoom_widget.get_zoom_percent()}%")
 
     def _redraw(self) -> None:
+        # Re-render from the pristine source image: the display copy is then
+        # freshly resized and _draw_overlays() paints ruler/contour on it, so
+        # toggling checkboxes or switching seeds never leaves stale pixels nor
+        # loses the overlays (the old code drew into a bitmap that could be
+        # skipped when no re-render happened).
         self.zoom_widget.render()
 
     def _draw_overlays(self) -> None:
-        if self.zoom_widget.image is None:
-            return
         img = self.zoom_widget.image
-        draw = ImageDraw.Draw(img)
+        if img is None:
+            return
         scale = self.zoom_widget.display_scale
-        w_orig, h_orig = img.size
+        if scale <= 0 or not math.isfinite(scale):
+            return
+        w_disp, h_disp = img.size
+        draw = ImageDraw.Draw(img)
 
-        if self.current_contour_pts is not None and self.show_contour_var.get():
-            pts = self.current_contour_pts
+        # --- mm ruler (shared implementation with the regular inspector) ---
+        if self.show_ruler_var.get():
+            try:
+                rec = self.records[self.filtered_indices[self.current_f_idx]]
+            except (IndexError, TypeError):
+                rec = {}
+            mm_per_px = self._parse_float(rec.get("mm_per_px"))
+            length_mm = self._parse_float(rec.get("length_mm"))
+            width_mm = self._parse_float(rec.get("width_mm"))
+            draw_mm_ruler(img, mm_per_px, scale, length_mm, width_mm)
+            # The ruler was painted onto the display copy; refresh the canvas
+            # bitmap before drawing the vector-like contour on top of it.
+            self.zoom_widget.redraw_display()
+            img = self.zoom_widget.image
+            if img is None:
+                return
+            draw = ImageDraw.Draw(img)
+
+        pts = self.current_contour_pts
+        if pts is not None and len(pts) >= 2:
             color = CONTOUR_COLORS.get(self.contour_color_name.get(), "#00FF66")
-            if len(pts) >= 3:
-                poly = [(float(p[0]), float(p[1])) for p in pts]
-                draw.line(poly + [poly[0]], fill=color, width=max(1, int(round(1.5 / scale))))
+            poly = [(float(p[0]) * scale, float(p[1]) * scale) for p in pts]
+            line_w = max(1, int(round(1.5)))
+            if self.show_contour_var.get():
+                draw.line(poly + [poly[0]], fill=color, width=line_w)
                 if self.show_points_var.get():
-                    r = max(2, int(round(2.5 / scale)))
+                    r = 3
                     for px, py in poly:
                         draw.ellipse((px - r, py - r, px + r, py + r), fill="#FF0055", outline="#FFFFFF")
 
-            if self.show_axis_var.get():
-                rec = self.records[self.filtered_indices[self.current_f_idx]]
+            if self.show_axis_var.get() and self.show_contour_var.get():
                 try:
-                    ang = float(rec.get("angle_deg", "").replace(",", "."))
-                    cx, cy = float(np.mean(pts[:, 0])), float(np.mean(pts[:, 1]))
+                    rec = self.records[self.filtered_indices[self.current_f_idx]]
+                    ang = float(str(rec.get("angle_deg", "")).replace(",", "."))
+                except (IndexError, TypeError, ValueError):
+                    ang = None
+                if ang is not None:
+                    cx = float(np.mean(pts[:, 0])) * scale
+                    cy = float(np.mean(pts[:, 1])) * scale
                     rad = math.radians(ang)
-                    axis_len = max(w_orig, h_orig) * 0.4
+                    axis_len = max(w_disp, h_disp) * 0.4
                     dx, dy = math.cos(rad) * axis_len, math.sin(rad) * axis_len
-                    draw.line([(cx - dx, cy - dy), (cx + dx, cy + dy)], fill="#00FFFF", width=max(1, int(round(1.5 / scale))))
-                    cr = max(3, int(round(3.5 / scale)))
+                    draw.line([(cx - dx, cy - dy), (cx + dx, cy + dy)], fill="#00FFFF", width=line_w)
+                    cr = 4
                     draw.ellipse((cx - cr, cy - cr, cx + cr, cy + cr), fill="#00FFFF")
-                except (ValueError, TypeError):
-                    pass
 
-        if self.show_ruler_var.get():
-            rec = self.records[self.filtered_indices[self.current_f_idx]]
-            try:
-                mm_per_px = float(rec.get("mm_per_px", "").replace(",", "."))
-                if mm_per_px > 0:
-                    px_per_mm = 1.0 / mm_per_px
-                    ruler_x = 10
-                    draw.line([(ruler_x, 10), (ruler_x, h_orig - 10)], fill="#FFFFFF", width=2)
-                    y, mm = 10.0, 0
-                    while y < h_orig - 10:
-                        tick_len = 10 if mm % 5 == 0 else 5
-                        draw.line([(ruler_x, y), (ruler_x + tick_len, y)], fill="#FFFFFF", width=1)
-                        if mm % 5 == 0 and mm > 0:
-                            draw.text((ruler_x + 12, y - 5), str(mm), fill="#FFFFFF")
-                        y += px_per_mm
-                        mm += 1
-            except (ValueError, TypeError):
-                pass
+    @staticmethod
+    def _parse_float(value: Any) -> float | None:
+        try:
+            f = float(str(value).replace(",", ".").strip())
+        except (TypeError, ValueError):
+            return None
+        return f if math.isfinite(f) else None
