@@ -16,7 +16,7 @@ from core.io_utils import fmt_float
 from core.models import DEFAULT_CSV_FIELDS, EXTRA_EDITABLE_FIELDS, IMAGE_EXTENSIONS, SKIP_CSV_FIELDS
 from gui.common.file_scan import scan_directory
 from gui.common.ruler import draw_mm_ruler
-from gui.common.zoomable import ZoomableCanvas, RESAMPLE
+from gui.common.zoomable import ZoomableCanvas, load_image_async, RESAMPLE
 
 POINT_HANDLE_RADIUS = 5
 POINT_HIT_RADIUS = 9
@@ -68,13 +68,21 @@ class InspectionApp:
         self.drag_point_index: int | None = None
         self.contour_line_items: list[int] = []
         self.contour_point_items: list[int] = []
+        # Guards against stale async image decodes (see _load_current_media).
+        self._image_gen = 0
+        self._last_render_size: tuple[int, int] = (0, 0)
 
         self.image_files: dict[str, str] = {}
         self.json_files: dict[str, str] = {}
-        self._load_data()
         self._build_ui()
         self._bind_keys()
-        self._update_all()
+        # Build the window first, then do CSV/dir-scan work when idle: the
+        # app used to feel slow to open because parsing happened before the
+        # first frame was ever drawn.
+        def _startup() -> None:
+            self._load_data()
+            self._update_all()
+        self.root.after_idle(_startup)
 
     def _load_data(self) -> None:
         self.image_files, self.json_files = scan_directory(self.data_dir)
@@ -315,7 +323,6 @@ class InspectionApp:
         self._update_form()
         self._load_current_media()
         self._update_statusbar()
-        self.root.after_idle(self._render_image)
 
     def _update_nav(self) -> None:
         total = len(self.records)
@@ -355,13 +362,19 @@ class InspectionApp:
             return
         record = self.records[self.current]
         image_path = self._find_image_path(record)
+        # Kick off the decode *before* touching the canvas so the UI thread
+        # never waits on JPEG; when it lands we call set_image which renders
+        # (and our render-callback re-draws contour + ruler overlays).
+        self._image_gen += 1
+        gen = self._image_gen
         if image_path and os.path.isfile(image_path):
-            try:
-                img = Image.open(image_path).convert("RGB")
-            except Exception:
-                img = self._make_placeholder(record)
+            def on_img(img: Image.Image | None, gen=gen, path=image_path) -> None:
+                if gen != self._image_gen or not self.root.winfo_exists():
+                    return
+                self.zoom_widget.set_image(img if img is not None else self._make_placeholder(record))
+            load_image_async(image_path, on_img, self.zoom_widget.canvas)
         else:
-            img = self._make_placeholder(record)
+            self.zoom_widget.set_image(self._make_placeholder(record))
 
         file_index = str(record.get("file_index", "")).strip()
         if not file_index and image_path:
@@ -385,7 +398,6 @@ class InspectionApp:
             actual = self.json_files.get(f"{img_base}_contour".lower())
             if actual:
                 loaded = self._load_contour_file(os.path.join(self.data_dir, actual))
-        self.zoom_widget.set_image(img)
 
     def _load_contour_file(self, path: str) -> bool:
         """Read contour points from *path*; return True on success."""
@@ -458,11 +470,18 @@ class InspectionApp:
         return img
 
     def _render_image(self) -> None:
+        """Repaint overlays after a zoom/pan/edit without re-decoding photos.
+
+        Full resize + PhotoImage conversion happens only when the geometry
+        actually changed (window resize / zoom buttons); plain edits such as
+        typing length/mm_per_px just redraw the cheap overlay layer.
+        """
         if self.zoom_widget.image is not None:
-            # The ruler is drawn directly on the freshly rendered display copy
-            # (ZoomableCanvas keeps the source image pristine), so it survives
-            # every re-render and never accumulates on the source file.
-            self.zoom_widget.render()
+            cw, ch = self.zoom_widget.canvas.winfo_width(), self.zoom_widget.canvas.winfo_height()
+            if (cw, ch) != self._last_render_size:
+                # Geometry changed: rebuild the display bitmap at the new fit.
+                self._last_render_size = (cw, ch)
+                self.zoom_widget.render()
             record = self.records[self.current] if self.records else {}
             mm_per_px = parse_float(record.get("mm_per_px"))
             length_mm = parse_float(self.length_var.get()) or parse_float(record.get("length_mm"))
@@ -695,6 +714,16 @@ class InspectionApp:
 
     def _mark_dirty_and_render(self, event: tk.Event | None = None) -> None:
         self._mark_dirty(event)
+        # Coalesce rapid keystrokes into one overlay repaint per idle cycle.
+        if getattr(self, "_render_after_id", None):
+            try:
+                self.root.after_cancel(self._render_after_id)
+            except Exception:
+                pass
+        self._render_after_id = self.root.after(80, self._render_image_debounced)
+
+    def _render_image_debounced(self) -> None:
+        self._render_after_id = None
         self._render_image()
 
     def _save_current(self, strict: bool = True) -> bool:
