@@ -13,7 +13,11 @@ from typing import Any
 import cv2
 import numpy as np
 
-from augmentation.geometric import estimate_background_stats, rotate_any_angle, transform_angle
+from augmentation.geometric import (
+    estimate_background_stats,
+    rotate_any_angle,
+    transform_angle,
+)
 from augmentation.photometric import JPEG_QUALITY, photometric
 from core.contour_io import load_contour
 from core.csv_utils import read_csv_robust, write_csv
