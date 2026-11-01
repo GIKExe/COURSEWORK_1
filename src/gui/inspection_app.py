@@ -459,12 +459,16 @@ class InspectionApp:
 
     def _render_image(self) -> None:
         if self.zoom_widget.image is not None:
+            # The ruler is drawn directly on the freshly rendered display copy
+            # (ZoomableCanvas keeps the source image pristine), so it survives
+            # every re-render and never accumulates on the source file.
+            self.zoom_widget.render()
             record = self.records[self.current] if self.records else {}
             mm_per_px = parse_float(record.get("mm_per_px"))
             length_mm = parse_float(self.length_var.get()) or parse_float(record.get("length_mm"))
             width_mm = parse_float(self.width_var.get()) or parse_float(record.get("width_mm"))
             draw_mm_ruler(self.zoom_widget.image, mm_per_px, self.zoom_widget.display_scale, length_mm, width_mm)
-            self.zoom_widget.render()
+            self.zoom_widget.redraw_display()
         self.zoom_lbl.config(text=f"{self.zoom_widget.get_zoom_percent()}%")
 
     def _draw_contour_overlay(self) -> None:
@@ -576,6 +580,39 @@ class InspectionApp:
                 self._save_contour(show_message=False)
             return "break"
 
+    @staticmethod
+    def _dist_to_segment(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
+        """Distance from point P to segment AB (2D)."""
+        vx, vy = bx - ax, by - ay
+        wx, wy = px - ax, py - ay
+        len2 = vx * vx + vy * vy
+        if len2 <= 0.0:
+            return math.hypot(wx, wy)
+        t = max(0.0, min(1.0, (wx * vx + wy * vy) / len2))
+        return math.hypot(wx - t * vx, wy - t * vy)
+
+    def _insertion_index(self, pt: tuple[float, float]) -> int:
+        """Index at which a new point must be inserted so that it connects to
+        its two nearest neighbours along the contour (the endpoints of the
+        closest existing segment), not to the first/last points of the list.
+
+        With fewer than 2 points there is no segment to attach to, so the
+        point is simply appended.
+        """
+        pts = self.contour_points
+        n = len(pts)
+        if n < 2:
+            return n
+        px, py = pt
+        best_seg, best_d = 0, float("inf")
+        for i in range(n):
+            ax, ay = pts[i]
+            bx, by = pts[(i + 1) % n]  # closing segment last->first included
+            d = self._dist_to_segment(px, py, ax, ay, bx, by)
+            if d < best_d:
+                best_d, best_seg = d, i
+        return best_seg + 1
+
     def _on_double_click(self, event: tk.Event) -> None:
         if self.zoom_widget.image is None:
             return
@@ -597,7 +634,11 @@ class InspectionApp:
                 return
             self.contour_path = os.path.join(self.data_dir, f"{file_index}_contour.json")
             self.contour_meta = {}
-        self.contour_points.append(pt)
+        # Insert the point after its two nearest neighbours (the endpoints of
+        # the closest existing contour segment) instead of appending it to the
+        # end of the list, which used to wire the new point straight to the
+        # first and last points of the contour.
+        self.contour_points.insert(self._insertion_index(pt), pt)
         self.contour_dirty = True
         self._draw_contour_overlay()
         self._save_contour(show_message=False)

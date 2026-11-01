@@ -41,6 +41,7 @@ class ZoomableCanvas:
         hbar.grid(row=1, column=0, sticky="ew")
         self.canvas.configure(yscrollcommand=vbar.set, xscrollcommand=hbar.set)
 
+        self._source_image: Image.Image | None = None
         self._image: Image.Image | None = None
         self._tk_image: ImageTk.PhotoImage | None = None
         self.display_scale: float = 1.0
@@ -68,24 +69,57 @@ class ZoomableCanvas:
         self._on_render = cb
 
     def set_image(self, img: Image.Image | None) -> None:
-        self._image = img
+        self._source_image = img
+        if img is None:
+            # keep the previous display scale so that a later redraw_display()
+            # does not work with stale geometry when nothing can be rendered
+            self._image = None
         self.zoom_mode = "fit"
         self.render()
 
     def render(self) -> None:
         self.canvas.delete("all")
-        if self._image is None:
+        src = self._source_image
+        if src is None:
+            # Nothing to show yet (e.g. window not mapped and no fallback).
+            # Do NOT drop a previously rendered display copy: callers draw
+            # overlays into self.image right after render() returns.
             return
-        w, h = self._image.size
+        if src.mode != "RGB":
+            src = src.convert("RGB")
+            self._source_image = src
+        w, h = src.size
         if w <= 0 or h <= 0:
             return
         scale = self._compute_scale(w, h)
         self.display_scale = scale
         dw, dh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
-        resized = self._image.resize((dw, dh), RESAMPLE) if (dw, dh) != (w, h) else self._image
+        # Resize a pristine copy every time: the source must never be mutated,
+        # otherwise overlays drawn into it would accumulate / disappear between
+        # renders (the aug-inspector contour bug).
+        resized = src.resize((dw, dh), RESAMPLE) if (dw, dh) != (w, h) else src.copy()
+        self._image = resized
         self._tk_image = ImageTk.PhotoImage(resized)
         self.canvas.create_image(0, 0, anchor="nw", image=self._tk_image, tags="base")
         self.canvas.configure(scrollregion=(0, 0, dw, dh))
+        if self._on_render:
+            self._on_render()
+
+    def redraw_display(self) -> None:
+        """Re-convert the current display copy (*self._image*) to a PhotoImage.
+
+        Used after somebody drew on ``self.image`` (e.g. the mm ruler): the
+        canvas bitmap is refreshed from the mutated display copy and the
+        render callback re-draws vector overlays on top of it.  The source
+        image stays untouched, so a later ``render()`` starts from clean data.
+        """
+        if self._image is None:
+            return
+        self.canvas.delete("all")
+        self._tk_image = ImageTk.PhotoImage(self._image)
+        self.canvas.create_image(0, 0, anchor="nw", image=self._tk_image, tags="base")
+        w, h = self._image.size
+        self.canvas.configure(scrollregion=(0, 0, max(1, w), max(1, h)))
         if self._on_render:
             self._on_render()
 
@@ -96,14 +130,14 @@ class ZoomableCanvas:
         self._zoom_by(0.8)
 
     def zoom_actual(self) -> None:
-        if self._image is None:
+        if self._source_image is None:
             return
         self.zoom_mode = "manual"
         self.zoom_factor = 1.0
         self.render()
 
     def zoom_fit(self) -> None:
-        if self._image is None:
+        if self._source_image is None:
             return
         self.zoom_mode = "fit"
         self.render()
@@ -114,10 +148,11 @@ class ZoomableCanvas:
     def clear(self) -> None:
         self.canvas.delete("all")
         self._image = None
+        self._source_image = None
         self._tk_image = None
 
     def _zoom_by(self, factor: float) -> None:
-        if self._image is None:
+        if self._source_image is None:
             return
         current = self.display_scale if self.display_scale > 0 else 1.0
         self.zoom_mode = "manual"
@@ -146,7 +181,7 @@ class ZoomableCanvas:
         if size == self._last_size:
             return
         self._last_size = size
-        if self._image is not None and self.zoom_mode == "fit":
+        if self._source_image is not None and self.zoom_mode == "fit":
             self.render()
 
     def _on_ctrl_wheel(self, event: tk.Event) -> None:
