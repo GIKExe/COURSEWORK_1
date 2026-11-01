@@ -7,7 +7,7 @@ from tkinter import filedialog, messagebox, ttk
 import cv2
 from PIL import Image, ImageTk
 
-from utils import (
+from src.utils import (
 	calculate_fit_scale,
 	clamp_display_scale,
 	compute_size_stats,

@@ -32,7 +32,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from utils import imread_unicode, imwrite_unicode
+from src.utils import imread_unicode, imwrite_unicode
 
 # ---------- логирование ----------
 
