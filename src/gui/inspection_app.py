@@ -143,7 +143,7 @@ class InspectionApp:
         ttk.Button(top, text="Сохранить", command=self.save).pack(side=tk.RIGHT)
 
         main = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
-        main.pack(fill=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        main.pack(fill='both', expand=True, padx=8, pady=(0, 8))
 
         img_frame = ttk.LabelFrame(main, text="Изображение", padding=6)
         main.add(img_frame, weight=3)

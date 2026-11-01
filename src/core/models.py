@@ -13,6 +13,9 @@ class SeedStatus(str, Enum):
     BLURRY = "blurry"
     UNKNOWN = "unknown"
 
+    def __str__(self) -> str:
+        return self.value
+
 
 STATUS_COLORS: dict[SeedStatus, tuple[int, int, int]] = {
     SeedStatus.FOCUSED: (0, 200, 0),
