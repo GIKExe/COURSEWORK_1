@@ -1,0 +1,1 @@
+"""Shared GUI components: zoomable canvas, tooltips, ruler, DPI."""

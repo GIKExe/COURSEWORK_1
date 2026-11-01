@@ -1,0 +1,1 @@
+"""Core business logic: segmentation, calibration, measurement, export."""
