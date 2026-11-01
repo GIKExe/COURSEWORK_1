@@ -283,7 +283,9 @@ class AugInspectionApp:
 
         self.current_contour_pts = None
         self.current_json_meta = {}
-        json_file = self.json_files.get(fi)
+        # scan_directory keys both dicts by file name *without extension*:
+        # the contour JSON for "1_2.jpg" is stored under "1_2_contour".
+        json_file = self.json_files.get(f"{fi}_contour".lower()) or self.json_files.get(fi.lower())
         if json_file:
             try:
                 with open(os.path.join(self.data_dir, json_file), "r", encoding="utf-8") as f:
@@ -303,7 +305,7 @@ class AugInspectionApp:
         else:
             self.aug_params_lbl.config(text="Оригинальный снимок")
 
-        img_name = self.image_files.get(fi)
+        img_name = self.image_files.get(fi.lower())
         if img_name:
             try:
                 self.zoom_widget.set_image(Image.open(os.path.join(self.data_dir, img_name)).convert("RGB"))

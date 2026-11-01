@@ -149,9 +149,28 @@ class InspectionApp:
         main.add(img_frame, weight=3)
         self.zoom_widget = ZoomableCanvas(img_frame)
         self.zoom_widget.set_render_callback(self._draw_contour_overlay)
-        self.zoom_widget.canvas.bind("<ButtonPress-1>", self._on_left_press, add="+")
-        self.zoom_widget.canvas.bind("<B1-Motion>", self._on_left_motion, add="+")
-        self.zoom_widget.canvas.bind("<ButtonRelease-1>", self._on_left_release, add="+")
+        # Replace (not add to) the pan bindings that ZoomableCanvas sets up in
+        # its constructor:  while a contour point is grabbed our handlers
+        # return "break", so LMB drags move *only the point*, never the image;
+        # when no point is grabbed they fall back to scan_mark/scan_dragto, so
+        # plain panning of the picture still works.
+        self.zoom_widget.canvas.bind("<ButtonPress-1>", self._on_left_press)
+        self.zoom_widget.canvas.bind("<B1-Motion>", self._on_left_motion)
+        self.zoom_widget.canvas.bind("<ButtonRelease-1>", self._on_left_release)
+
+        def _pan_mark(event: tk.Event) -> None:
+            """Start pan only when no contour point was grabbed."""
+            if self.drag_point_index is None:
+                self.zoom_widget.canvas.scan_mark(event.x, event.y)
+
+        def _pan_dragto(event: tk.Event) -> None:
+            if self.drag_point_index is None:
+                self.zoom_widget.canvas.scan_dragto(event.x, event.y, gain=1)
+
+        # add="+" keeps our handlers above; they return "break" whenever a
+        # point is being dragged, so these pan handlers never run then.
+        self.zoom_widget.canvas.bind("<ButtonPress-1>", _pan_mark, add="+")
+        self.zoom_widget.canvas.bind("<B1-Motion>", _pan_dragto, add="+")
         self.zoom_widget.canvas.bind("<Double-Button-1>", self._on_double_click)
         self.zoom_widget.canvas.bind("<Button-3>", self._on_right_click)
 
@@ -348,44 +367,43 @@ class InspectionApp:
         if not file_index and image_path:
             file_index = os.path.splitext(os.path.basename(image_path))[0]
         file_index = self._base_name(file_index)
+        loaded = False
         if file_index:
-            contour_name = f"{file_index}_contour.json"
-            actual = self.json_files.get(contour_name.lower())
-            self.contour_path = os.path.join(self.data_dir, actual or contour_name)
-            if os.path.isfile(self.contour_path):
-                try:
-                    with open(self.contour_path, "r", encoding="utf-8") as fh:
-                        data = json.load(fh)
-                    if isinstance(data, dict):
-                        self.contour_meta = data
-                        self.contour_points = parse_raw_points(data.get("points", []))
-                    elif isinstance(data, list):
-                        self.contour_meta = {"points": data}
-                        self.contour_points = parse_raw_points(data)
-                except Exception:
-                    pass
+            # scan_directory keys JSONs by base name without extension.
+            actual = self.json_files.get(f"{file_index}_contour".lower())
+            if actual:
+                loaded = self._load_contour_file(os.path.join(self.data_dir, actual))
+            if not loaded:
+                # The file may not have been in the scan yet (e.g. just created).
+                self.contour_path = os.path.join(self.data_dir, f"{file_index}_contour.json")
+                if not os.path.isfile(self.contour_path):
+                    self.contour_path = None
         # If the exact "<file_index>_contour.json" was missing, try to locate a
         # contour JSON that matches the image actually found on disk.
-        if self.contour_path is None and image_path:
+        if self.contour_path is None and not loaded and image_path:
             img_base = self._base_name(image_path)
-            alt_name = f"{img_base}_contour.json"
-            actual = self.json_files.get(alt_name.lower())
+            actual = self.json_files.get(f"{img_base}_contour".lower())
             if actual:
-                self.contour_path = os.path.join(self.data_dir, actual)
-                try:
-                    with open(self.contour_path, "r", encoding="utf-8") as fh:
-                        data = json.load(fh)
-                    if isinstance(data, dict):
-                        self.contour_meta = data
-                        self.contour_points = parse_raw_points(data.get("points", []))
-                    elif isinstance(data, list):
-                        self.contour_meta = {"points": data}
-                        self.contour_points = parse_raw_points(data)
-                except Exception:
-                    self.contour_path = None
-                    self.contour_meta = {}
-                    self.contour_points = []
+                loaded = self._load_contour_file(os.path.join(self.data_dir, actual))
         self.zoom_widget.set_image(img)
+
+    def _load_contour_file(self, path: str) -> bool:
+        """Read contour points from *path*; return True on success."""
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:
+            return False
+        if isinstance(data, dict):
+            self.contour_meta = data
+            self.contour_points = parse_raw_points(data.get("points", []))
+        elif isinstance(data, list):
+            self.contour_meta = {"points": data}
+            self.contour_points = parse_raw_points(data)
+        else:
+            return False
+        self.contour_path = path
+        return True
 
     @staticmethod
     def _base_name(name: str) -> str:
@@ -401,14 +419,14 @@ class InspectionApp:
         if not base:
             return None
         key = base.lower()
-        # Fast path: exact base-name match from the directory scan.
-        for ext in IMAGE_EXTENSIONS:
-            actual = self.image_files.get(key + ext)
-            if actual:
-                return os.path.join(self.data_dir, actual)
+        # Fast path: exact base-name match from the directory scan
+        # (scan_directory keys images by name without extension).
+        actual = self.image_files.get(key)
+        if actual:
+            return os.path.join(self.data_dir, actual)
         # Fallback: tolerate stray whitespace / partial names in the CSV.
-        for fname, actual in self.image_files.items():
-            stem = os.path.splitext(fname)[0].strip()
+        for stem, actual in self.image_files.items():
+            stem = stem.strip()
             if stem == key or stem.startswith(key + "_") or key.startswith(stem + "_"):
                 return os.path.join(self.data_dir, actual)
         return None
@@ -461,12 +479,13 @@ class InspectionApp:
             return
         scale = self.zoom_widget.display_scale
         if len(self.contour_points) >= 2:
+            # Connect every point with its two neighbours along the polyline,
+            # and close the figure back to the first point (a segment between
+            # the last and the first point is drawn as well).
             coords: list[float] = []
             for x, y in self.contour_points:
                 coords.extend([x * scale, y * scale])
-            if len(self.contour_points) > 2:
-                x0, y0 = self.contour_points[0]
-                coords.extend([x0 * scale, y0 * scale])
+            coords.extend([self.contour_points[0][0] * scale, self.contour_points[0][1] * scale])
             self.contour_line_items = [
                 canvas.create_line(coords, fill="#000000", width=4, tags=("contour", "contour_line")),
                 canvas.create_line(coords, fill="#00ff00", width=2, tags=("contour", "contour_line")),
@@ -510,12 +529,15 @@ class InspectionApp:
         idx = self._find_point_at(event)
         if idx is not None and 0 <= idx < len(self.contour_points):
             # Grab a point: start dragging it.  Returning "break" prevents the
-            # ZoomableCanvas pan binding (scan_mark/scan_dragto) from also
-            # moving the whole image while we drag the point.
+            # pan bindings (scan_mark/scan_dragto) from also moving the whole
+            # image while we drag the point — only the point moves.
             self.drag_point_index = idx
             self._update_point_handles()
             return "break"
-        self.zoom_widget.canvas.scan_mark(event.x, event.y)
+        # No point under the cursor: let the image be panned instead.  The
+        # companion _pan_mark/_pan_dragto handlers bound with add="+" do the
+        # actual scan_mark/scan_dragto; this handler just does nothing.
+        return None
 
     def _update_point_handles(self) -> None:
         """Move only the dragged handle and the contour lines (fast drag path)."""
@@ -531,8 +553,9 @@ class InspectionApp:
         coords: list[float] = []
         for px, py in self.contour_points:
             coords.extend([px * scale, py * scale])
-        if len(self.contour_points) > 2:
-            coords.extend([self.contour_points[0][0] * scale, self.contour_points[0][1] * scale])
+        # Keep the closing segment (last point -> first point) in sync with
+        # the dragged point, exactly like _draw_contour_overlay builds it.
+        coords.extend([self.contour_points[0][0] * scale, self.contour_points[0][1] * scale])
         for line_item in self.contour_line_items:
             canvas.coords(line_item, *coords)
 
