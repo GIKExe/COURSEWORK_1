@@ -8,6 +8,7 @@ import numpy as np
 
 from core.models import ProcessResult, SeedItem, SeedStatus, STATUS_COLORS
 from core.params import ensure_odd
+from core.seed_geometry import compute_seed_metrics
 
 
 def to_uint8(img: np.ndarray) -> np.ndarray:
@@ -329,16 +330,26 @@ def process_image(img_bgr: np.ndarray, params: dict[str, Any]) -> ProcessResult:
         rect = cv2.minAreaRect(cand["contour"])
         box = cv2.boxPoints(rect)
         side_a, side_b = rect[1]
-        edge1, edge2 = box[1] - box[0], box[2] - box[1]
-        len1, len2 = float(np.linalg.norm(edge1)), float(np.linalg.norm(edge2))
-        major = edge1 if len1 >= len2 else edge2
-        angle = float(np.degrees(np.arctan2(major[1], major[0]))) % 180.0 if np.linalg.norm(major) > 1e-6 else 0.0
+
+        # Length and rotation angle are measured along the seed contour itself:
+        # the longest chord between the two most distant contour points that
+        # does not cross the contour (never the bounding-box rectangle).
+        metrics = compute_seed_metrics(img_bgr, cand["contour"])
+        length_px = float(metrics.get("length_px", max(side_a, side_b)))
+        angle_deg = float(metrics.get("angle_deg", 0.0))
+        width_px = min(float(cv2.contourArea(cv2.convexHull(cand["contour"])) / max(length_px, 1e-6)),
+                       float(min(side_a, side_b)))
+        if width_px <= 0:
+            width_px = float(min(side_a, side_b))
 
         item: SeedItem = dict(cand)
         item.update(
             rect=rect, box=box, center_x=float(rect[0][0]), center_y=float(rect[0][1]),
-            length_px=float(max(side_a, side_b)), width_px=float(min(side_a, side_b)),
-            angle_deg=angle, edge_width=ew, status=status,
+            length_px=length_px, width_px=width_px,
+            angle_deg=angle_deg, edge_width=ew, status=status,
+            rgb_averaged=metrics.get("rgb_averaged"),
+            groove=metrics.get("groove"),
+            groove_score=metrics.get("groove_score"),
         )
         items.append(item)
 
