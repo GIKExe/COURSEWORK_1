@@ -12,13 +12,12 @@
 - сохранение контуров семян в JSON.
 """
 
-from typing import Any, Dict, List, Optional, Tuple
-
-import os
-import re
 import csv
 import json
 import math
+import os
+import re
+from typing import Any, Optional
 
 import cv2
 import numpy as np
@@ -1191,7 +1190,7 @@ def format_size_stats(stats):
 # Вынесенные функции из main.py
 # ============================================================
 
-def get_param_definitions() -> Tuple[Tuple[str, str, float, float, float, Any, str], ...]:
+def get_param_definitions() -> tuple[tuple[str, str, float, float, float, Any, str], ...]:
     """
     Единый источник параметров обработки.
 
@@ -1223,7 +1222,7 @@ def get_param_definitions() -> Tuple[Tuple[str, str, float, float, float, Any, s
     )
 
 
-def get_checkbox_definitions() -> Tuple[Tuple[str, str, bool], ...]:
+def get_checkbox_definitions() -> tuple[tuple[str, str, bool], ...]:
     """
     Единый источник чекбоксов.
 
@@ -1243,7 +1242,7 @@ def get_checkbox_definitions() -> Tuple[Tuple[str, str, bool], ...]:
     )
 
 
-def get_default_params() -> Dict[str, Any]:
+def get_default_params() -> dict[str, Any]:
     """
     Возвращает параметры по умолчанию.
 
@@ -1342,7 +1341,7 @@ def format_param_label(title: str, value: Any, kind: str, step: float) -> str:
     return f"{title}: {int(round(float(value)))}"
 
 
-def normalize_params(params: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_params(params: dict[str, Any]) -> dict[str, Any]:
     """
     Приводит параметры к согласованному виду.
 
@@ -1367,7 +1366,7 @@ def normalize_params(params: Dict[str, Any]) -> Dict[str, Any]:
     return params
 
 
-def try_calibrate_ruler(image_bgr: Any) -> Tuple[Optional[float], Optional[str]]:
+def try_calibrate_ruler(image_bgr: Any) -> tuple[Optional[float], Optional[str]]:
     """
     Безопасная обёртка для калибровки линейки.
 
@@ -1404,7 +1403,7 @@ def format_calibration_message(mm_per_px: float) -> str:
     return f"{mm:.6f} мм/px ({1.0 / mm:.2f} px/mm)"
 
 
-def count_seed_statuses(items: List[Dict[str, Any]]) -> Dict[str, int]:
+def count_seed_statuses(items: list[dict[str, Any]]) -> dict[str, int]:
     """
     Считает статусы семян.
     """
@@ -1422,7 +1421,7 @@ def count_seed_statuses(items: List[Dict[str, Any]]) -> Dict[str, int]:
     }
 
 
-def format_seed_status_message(counts: Dict[str, int]) -> str:
+def format_seed_status_message(counts: dict[str, int]) -> str:
     """
     Форматирует строку статуса по количеству семян.
     """
@@ -1435,11 +1434,11 @@ def format_seed_status_message(counts: Dict[str, int]) -> str:
 
 
 def select_items_for_export(
-    items: List[Dict[str, Any]],
+    items: list[dict[str, Any]],
     *,
     save_only_focused: bool = False,
     skip_blurry: bool = True,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     Выбирает объекты для сохранения по флагам.
 
@@ -1457,15 +1456,15 @@ def select_items_for_export(
 
 
 def assign_unique_seed_indices(
-    items: List[Dict[str, Any]],
-) -> List[Tuple[Dict[str, Any], int]]:
+    items: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], int]]:
     """
     Сортирует объекты по индексу и назначает каждому уникальный индекс.
 
     Возвращает список кортежей:
         (item, seed_index)
     """
-    def sort_key(item: Dict[str, Any]) -> int:
+    def sort_key(item: dict[str, Any]) -> int:
         try:
             return int(item.get("index", 0))
         except Exception:
@@ -1493,10 +1492,10 @@ def assign_unique_seed_indices(
 
 
 def compute_crop_box(
-    bbox: Tuple[int, int, int, int],
-    image_shape: Tuple[int, int, Any],
+    bbox: tuple[int, int, int, int],
+    image_shape: tuple[int, int, Any],
     padding: int = 0,
-) -> Tuple[int, int, int, int]:
+) -> tuple[int, int, int, int]:
     """
     Вычисляет координаты кропа с отступом, не выходя за границы изображения.
 
@@ -1530,11 +1529,11 @@ def _px_to_mm(value_px: Any, mm_per_px: Optional[float], decimals: int = 4) -> s
 
 
 def build_seed_csv_row(
-    item: Dict[str, Any],
+    item: dict[str, Any],
     file_index: str,
     seed_index: int,
     mm_per_px: Optional[float],
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Собирает одну строку для seeds.csv.
     """
@@ -1558,13 +1557,13 @@ def build_seed_csv_row(
 
 def export_seed_items(
     image_bgr: Any,
-    items: List[Dict[str, Any]],
+    items: list[dict[str, Any]],
     out_dir: str,
     source_name: str,
     *,
     padding: int = 0,
     mm_per_px: Optional[float] = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Единая функция экспорта семян:
 
