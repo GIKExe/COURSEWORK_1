@@ -51,7 +51,16 @@ APP_TITLE = "Контроль параметров семечек"
 if len(sys.argv) > 1:
     OUT_DIR = os.path.abspath(sys.argv[1])
 else:
-    OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
+    candidates = [
+        "out",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "out"),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "out"),
+    ]
+    OUT_DIR = os.path.abspath("out")
+    for c in candidates:
+        if os.path.isdir(c):
+            OUT_DIR = os.path.abspath(c)
+            break
 
 INPUT_CSV = os.path.join(OUT_DIR, "seeds.csv")
 DEFAULT_OUTPUT_CSV = os.path.join(OUT_DIR, "seeds_edited.csv")

@@ -32,7 +32,12 @@ from typing import Any
 import cv2
 import numpy as np
 
-from src.utils import imread_unicode, imwrite_unicode
+from collections import Counter, defaultdict
+
+try:
+    from utils import imread_unicode, imwrite_unicode
+except ImportError:
+    from src.utils import imread_unicode, imwrite_unicode
 
 # ---------- логирование ----------
 
@@ -80,7 +85,8 @@ CSV_NAME = "seeds_edited.csv"   # если файла нет, берётся see
 DST_DIR = "out_aug"
 
 N_AUG = 11             # копий на семечку (вместе с оригиналом получится x12)
-VAL_FRACTION = 0.2    # доля фото для val (они не аугментируются), 0 = выключить
+VAL_FRACTION = 0.2    # доля для val (не аугментируются), 0 = выключить
+SPLIT_MODE = "auto"   # "auto" (по фото если >=4 фото, иначе стратифицированно по семенам), "seeds", "photos"
 SEED = 42
 PAD_DEFAULT = 25      # отступ вокруг семечки, как в cut.py
 
@@ -494,29 +500,172 @@ def load_dataset(
     return csv_path, fields, rows
 
 
+def assign_splits(
+    rows: list[dict[str, str]],
+    val_fraction: float,
+    rng_stdlib: Any,
+    split_mode: str = SPLIT_MODE,
+) -> dict[str, str]:
+    """
+    Разделяет набор данных на train и val.
+
+    Стратегии:
+    1. Если в CSV уже есть размеченные 'train' и 'val', сохраняет их.
+    2. При split_mode == 'auto':
+       - если фото >= 4, используется групповой сплит по фото (Group Split);
+       - если фото < 4 (например, всего 1 фото), применяется стратифицированный
+         сплит по семенам (по status и shape внутри каждого фото).
+    3. При split_mode == 'seeds': всегда стратифицированный сплит по семенам.
+    4. При split_mode == 'photos': групповой сплит по фото (если фото >= 2, иначе fallback на 'seeds').
+
+    Возвращает:
+      словарь {file_index: "train" | "val"}
+    """
+    if not rows:
+        return {}
+
+    existing_splits = {r.get("split", "").strip().lower() for r in rows if r.get("split")}
+    if "train" in existing_splits and "val" in existing_splits:
+        log.info("Обнаружена готовая разметка train/val в CSV — сохраняем её.")
+        return {r["file_index"]: r.get("split", "train").strip().lower() for r in rows}
+
+    n_total = len(rows)
+    if val_fraction <= 0 or n_total < 2:
+        log.info("VAL_FRACTION <= 0 или семян < 2: все %d семян назначены в train.", n_total)
+        return {r["file_index"]: "train" for r in rows}
+
+    sources_map: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for r in rows:
+        sources_map[source_of(r["file_index"])].append(r)
+
+    unique_sources = sorted(sources_map.keys())
+
+    use_photo_split = False
+    if split_mode == "photos":
+        if len(unique_sources) >= 2:
+            use_photo_split = True
+        else:
+            log.warning(
+                "Запрошен split_mode='photos', но источник всего 1 (%s). "
+                "Автоматически переключаемся на поштучный сплит семян.",
+                unique_sources[0],
+            )
+    elif split_mode == "auto":
+        if len(unique_sources) >= 4:
+            use_photo_split = True
+        else:
+            log.info(
+                "Источников (%d) < 4. Применяется поштучный стратифицированный сплит семян.",
+                len(unique_sources),
+            )
+
+    split_map: dict[str, str] = {}
+
+    if use_photo_split:
+        target_val = int(round(n_total * val_fraction))
+        shuffled_srcs = list(unique_sources)
+        rng_stdlib.shuffle(shuffled_srcs)
+
+        selected_val_srcs: set[str] = set()
+        current_val_seeds = 0
+
+        for s in shuffled_srcs:
+            s_len = len(sources_map[s])
+            if current_val_seeds == 0 or (
+                current_val_seeds + s_len <= target_val * 1.25
+                and len(selected_val_srcs) < len(shuffled_srcs) - 1
+            ):
+                selected_val_srcs.add(s)
+                current_val_seeds += s_len
+                if current_val_seeds >= target_val:
+                    break
+
+        if not selected_val_srcs:
+            min_src = min(shuffled_srcs, key=lambda s: len(sources_map[s]))
+            selected_val_srcs.add(min_src)
+            current_val_seeds = len(sources_map[min_src])
+
+        for s, src_rows in sources_map.items():
+            sp = "val" if s in selected_val_srcs else "train"
+            for r in src_rows:
+                split_map[r["file_index"]] = sp
+
+        log.info(
+            "Групповой сплит по фото: %d источников в val %s, всего семян в val: %d из %d (%.1f%%)",
+            len(selected_val_srcs),
+            sorted(selected_val_srcs),
+            current_val_seeds,
+            n_total,
+            current_val_seeds / n_total * 100,
+        )
+    else:
+        target_val = max(1, int(round(n_total * val_fraction)))
+        val_indices: set[str] = set()
+
+        for s, src_rows in sources_map.items():
+            strata: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
+            for r in src_rows:
+                st = r.get("status", "unknown").strip().lower()
+                sh = r.get("shape", "").strip().lower()
+                strata[(st, sh)].append(r)
+
+            for key, items in strata.items():
+                items_copy = list(items)
+                rng_stdlib.shuffle(items_copy)
+                k_val = int(round(len(items_copy) * val_fraction))
+                for item in items_copy[:k_val]:
+                    val_indices.add(item["file_index"])
+
+        all_fis = [r["file_index"] for r in rows]
+        rng_stdlib.shuffle(all_fis)
+
+        if len(val_indices) == 0 and target_val > 0:
+            for fi in all_fis[:target_val]:
+                val_indices.add(fi)
+        elif abs(len(val_indices) - target_val) > max(2, int(target_val * 0.2)):
+            if len(val_indices) < target_val:
+                remain = [fi for fi in all_fis if fi not in val_indices]
+                for fi in remain[:(target_val - len(val_indices))]:
+                    val_indices.add(fi)
+            elif len(val_indices) > target_val:
+                val_list = list(val_indices)
+                rng_stdlib.shuffle(val_list)
+                val_indices = set(val_list[:target_val])
+
+        for r in rows:
+            fi = r["file_index"]
+            split_map[fi] = "val" if fi in val_indices else "train"
+
+        n_val_actual = len(val_indices)
+        log.info(
+            "Стратифицированный сплит по семенам: val: %d из %d (%.1f%%), train: %d (%.1f%%)",
+            n_val_actual,
+            n_total,
+            n_val_actual / n_total * 100,
+            n_total - n_val_actual,
+            (n_total - n_val_actual) / n_total * 100,
+        )
+
+    train_statuses = Counter(
+        r.get("status", "unknown") for r in rows if split_map[r["file_index"]] == "train"
+    )
+    val_statuses = Counter(
+        r.get("status", "unknown") for r in rows if split_map[r["file_index"]] == "val"
+    )
+    log.info("Статусы в train: %s", dict(train_statuses))
+    log.info("Статусы в val:   %s", dict(val_statuses))
+
+    return split_map
+
+
 def split_sources(
     rows: list[dict[str, str]],
     val_fraction: float,
     rng_stdlib: Any,
 ) -> set[str]:
-    """
-    Делит *фото* (не семечки) на train/val.
-    Семечки одного снимка всегда попадают в один split.
-    Возвращает множество source-имён для val.
-    """
-    sources = sorted({source_of(r["file_index"]) for r in rows})
-    rng_stdlib.shuffle(sources)
-
-    n_val = 0
-    if val_fraction > 0 and len(sources) > 1:
-        n_val = max(1, int(round(len(sources) * val_fraction)))
-
-    val_sources = set(sources[:n_val])
-    log.info(
-        "Split: %d фото всего, %d val (%s)",
-        len(sources), len(val_sources), sorted(val_sources),
-    )
-    return val_sources
+    """Обратная совместимость: возвращает имена источников, семена которых попали в val."""
+    s_map = assign_splits(rows, val_fraction, rng_stdlib)
+    return {source_of(fi) for fi, sp in s_map.items() if sp == "val"}
 
 
 # ---------- аугментация одной семечки ----------
@@ -646,10 +795,25 @@ def save_results(
 
 # ---------- основной код ----------
 
+def resolve_path(d: str) -> str:
+    if os.path.isabs(d) or os.path.isdir(d):
+        return d
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        d,
+        os.path.join(script_dir, d),
+        os.path.join(os.path.dirname(script_dir), d),
+    ]
+    for c in candidates:
+        if os.path.isdir(c):
+            return c
+    return d
+
+
 def main() -> None:
-    src = sys.argv[1] if len(sys.argv) > 1 else SRC_DIR
+    src = resolve_path(sys.argv[1] if len(sys.argv) > 1 else SRC_DIR)
     csv_name = sys.argv[2] if len(sys.argv) > 2 else CSV_NAME
-    dst = sys.argv[3] if len(sys.argv) > 3 else DST_DIR
+    dst = resolve_path(sys.argv[3] if len(sys.argv) > 3 else DST_DIR)
 
     # Воспроизводимые генераторы случайных чисел
     import random
@@ -661,7 +825,7 @@ def main() -> None:
     os.makedirs(dst, exist_ok=True)
 
     # Разделение на train/val по фотографиям
-    val_sources = split_sources(rows, VAL_FRACTION, rng_stdlib)
+    split_map = assign_splits(rows, VAL_FRACTION, rng_stdlib, SPLIT_MODE)
 
     # Подготовка выходных полей
     out_fields = list(fields)
@@ -688,7 +852,7 @@ def main() -> None:
             continue
 
         src_name = source_of(fi)
-        split = "val" if src_name in val_sources else "train"
+        split = split_map.get(fi, "train")
 
         # Оригинал копируем как есть
         shutil.copy2(img_path, os.path.join(dst, fi + IMG_EXT))
@@ -721,7 +885,12 @@ def main() -> None:
     # Сохранение
     save_results(dst, out_fields, out_rows)
 
-    log.info("Оригиналов: %d, аугментаций: %d, пропущено: %d", n_orig, n_aug, n_skip)
+    n_val_final = sum(1 for r in out_rows if r.get("split") == "val")
+    n_train_orig = sum(1 for r in out_rows if r.get("split") == "train" and str(r.get("is_aug")) == "0")
+    log.info(
+        "Итог: оригиналов %d (в train: %d, в val: %d), аугментаций: %d, пропущено: %d, всего записей: %d",
+        n_orig, n_train_orig, n_val_final, n_aug, n_skip, len(out_rows)
+    )
     log.info("Результат: %s", dst)
 
 

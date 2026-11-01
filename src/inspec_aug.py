@@ -41,12 +41,20 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if len(sys.argv) > 1:
     DEFAULT_DIR = os.path.abspath(sys.argv[1])
 else:
-    # Если есть out_aug — берём его, иначе out
-    aug_candidate = os.path.join(BASE_DIR, "out_aug")
-    if os.path.isdir(aug_candidate):
-        DEFAULT_DIR = aug_candidate
-    else:
-        DEFAULT_DIR = os.path.join(BASE_DIR, "out")
+    # Ищем out_aug или out в текущей папке, рядом со скриптом или в корне проекта
+    candidates = [
+        "out_aug",
+        os.path.join(BASE_DIR, "out_aug"),
+        os.path.join(os.path.dirname(BASE_DIR), "out_aug"),
+        "out",
+        os.path.join(BASE_DIR, "out"),
+        os.path.join(os.path.dirname(BASE_DIR), "out"),
+    ]
+    DEFAULT_DIR = os.path.abspath("out_aug")
+    for c in candidates:
+        if os.path.isdir(c):
+            DEFAULT_DIR = os.path.abspath(c)
+            break
 
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
 
