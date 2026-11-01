@@ -8,13 +8,12 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
 
-import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from core.csv_utils import read_csv_robust
-from core.models import IMAGE_EXTENSIONS
 from gui.common.file_scan import scan_directory
-from gui.common.zoomable import ZoomableCanvas
+from gui.common.ruler import draw_mm_ruler
+from gui.common.zoomable import ZoomableCanvas, load_image_async
 
 CONTOUR_COLORS: dict[str, str] = {
     "Зелёный": "#00FF66", "Жёлтый": "#FFE600", "Бирюзовый": "#00F0FF",
@@ -34,12 +33,18 @@ class AugInspectionApp:
         self.current_f_idx = 0
         self.image_files: dict[str, str] = {}
         self.json_files: dict[str, str] = {}
-        self.current_contour_pts: np.ndarray | None = None
+        self.current_contour_pts: list[tuple[float, float]] = []
         self.current_json_meta: dict[str, Any] = {}
+        # Monotonic counter used to discard image decodes that finish after
+        # the user already switched to another seed (async loading guard).
+        self._load_gen = 0
+        self._pending_img_path: str | None = None
 
         self._build_ui()
-        self._load_dataset(self.data_dir)
         self._bind_events()
+        # Defer the (potentially large) CSV/scan work until the window has
+        # been drawn — this is what made the app feel like it opened slowly.
+        self.root.after(60, lambda: self._load_dataset(self.data_dir))
 
     def _load_dataset(self, folder: str) -> None:
         self.data_dir = folder
@@ -259,10 +264,17 @@ class AugInspectionApp:
             self._load_dataset(d)
 
     def _update_view(self) -> None:
+        """Refresh info panel + contour and kick off async image loading.
+
+        Everything here is O(record) bookkeeping only; the expensive JPEG
+        decode happens off the UI thread via load_image_async(), so pressing
+        Next/Prev never blocks the interface.
+        """
         n = len(self.filtered_indices)
         if n == 0:
             self.pos_var.set("0")
             self.total_lbl.config(text="из 0")
+            self._load_gen += 1  # invalidate any in-flight decode
             self.zoom_widget.clear()
             return
         self.pos_var.set(str(self.current_f_idx + 1))
@@ -281,16 +293,18 @@ class AugInspectionApp:
         self.aug_parent_lbl.config(text=f"Родитель: {aug_of or '—'}")
         self.aug_split_lbl.config(text=f"Split: {split.upper()}")
 
-        self.current_contour_pts = None
+        self.current_contour_pts = []
         self.current_json_meta = {}
-        json_file = self.json_files.get(fi.lower())
+        # scan_directory keys both dicts by file name *without extension*:
+        # the contour JSON for "1_2.jpg" is stored under "1_2_contour".
+        json_file = self.json_files.get(f"{fi}_contour".lower()) or self.json_files.get(fi.lower())
         if json_file:
             try:
                 with open(os.path.join(self.data_dir, json_file), "r", encoding="utf-8") as f:
                     self.current_json_meta = json.load(f)
                 pts = self.current_json_meta.get("points", [])
                 if pts:
-                    self.current_contour_pts = np.array(pts, dtype=np.float32)
+                    self.current_contour_pts = [(float(p[0]), float(p[1])) for p in pts]
             except Exception:
                 pass
 
@@ -304,66 +318,97 @@ class AugInspectionApp:
             self.aug_params_lbl.config(text="Оригинальный снимок")
 
         img_name = self.image_files.get(fi.lower())
-        if img_name:
-            try:
-                self.zoom_widget.set_image(Image.open(os.path.join(self.data_dir, img_name)).convert("RGB"))
-            except Exception:
-                self.zoom_widget.clear()
+        img_path = os.path.join(self.data_dir, img_name) if img_name else None
+        self._pending_img_path = img_path
+        self._load_gen += 1
+        gen = self._load_gen
+        if img_path and os.path.isfile(img_path):
+            def on_loaded(img: Image.Image | None, gen=gen) -> None:
+                # Drop results of stale loads (user switched again meanwhile).
+                if gen != self._load_gen or not self.root.winfo_exists():
+                    return
+                if img is None:
+                    self.zoom_widget.set_image(None)
+                else:
+                    self.zoom_widget.set_image(img)
+                self.zoom_lbl.config(text=f"{self.zoom_widget.get_zoom_percent()}%")
+
+            # Cached images are delivered synchronously inside load_image_async
+            # (instant when stepping back/forth); fresh ones arrive via
+            # after_idle once the background decode finishes.
+            load_image_async(img_path, on_loaded, self.zoom_widget.canvas)
         else:
-            self.zoom_widget.clear()
-        self.zoom_lbl.config(text=f"{self.zoom_widget.get_zoom_percent()}%")
+            self.zoom_widget.set_image(None)
+            self.zoom_lbl.config(text="--%")
 
     def _redraw(self) -> None:
-        self.zoom_widget.render()
+        # Repaint only the vector overlay layer — cheap canvas items are just
+        # deleted and recreated; the photo bitmap is never re-decoded/resized.
+        self._draw_overlays()
+
+    def _current_record(self) -> dict[str, str]:
+        try:
+            return self.records[self.filtered_indices[self.current_f_idx]]
+        except (IndexError, TypeError):
+            return {}
 
     def _draw_overlays(self) -> None:
-        if self.zoom_widget.image is None:
-            return
+        """Draw contour / points / angle axis as tagged canvas items.
+
+        Vector items live on the canvas *above* the photo, so they show up on
+        every seed immediately after the image arrives (the old raster-paint
+        approach silently lost them whenever a re-render did not happen), and
+        redrawing them costs microseconds instead of a full resize+PhotoImage
+        conversion.
+        """
+        canvas = self.zoom_widget.canvas
+        canvas.delete("overlay")
         img = self.zoom_widget.image
-        draw = ImageDraw.Draw(img)
+        if img is None:
+            return
         scale = self.zoom_widget.display_scale
-        w_orig, h_orig = img.size
+        if scale <= 0 or not math.isfinite(scale):
+            return
 
-        if self.current_contour_pts is not None and self.show_contour_var.get():
-            pts = self.current_contour_pts
-            color = CONTOUR_COLORS.get(self.contour_color_name.get(), "#00FF66")
-            if len(pts) >= 3:
-                poly = [(float(p[0]), float(p[1])) for p in pts]
-                draw.line(poly + [poly[0]], fill=color, width=max(1, int(round(1.5 / scale))))
-                if self.show_points_var.get():
-                    r = max(2, int(round(2.5 / scale)))
-                    for px, py in poly:
-                        draw.ellipse((px - r, py - r, px + r, py + r), fill="#FF0055", outline="#FFFFFF")
+        pts = self.current_contour_pts
+        if len(pts) < 2:
+            return
+        color = CONTOUR_COLORS.get(self.contour_color_name.get(), "#00FF66")
+        coords: list[float] = []
+        for x, y in pts:
+            coords.extend([x * scale, y * scale])
+        # Closed polygon: each point connects to both neighbours, last->first
+        # segment included.
+        coords.extend([pts[0][0] * scale, pts[0][1] * scale])
 
-            if self.show_axis_var.get():
-                rec = self.records[self.filtered_indices[self.current_f_idx]]
-                try:
-                    ang = float(rec.get("angle_deg", "").replace(",", "."))
-                    cx, cy = float(np.mean(pts[:, 0])), float(np.mean(pts[:, 1]))
-                    rad = math.radians(ang)
-                    axis_len = max(w_orig, h_orig) * 0.4
-                    dx, dy = math.cos(rad) * axis_len, math.sin(rad) * axis_len
-                    draw.line([(cx - dx, cy - dy), (cx + dx, cy + dy)], fill="#00FFFF", width=max(1, int(round(1.5 / scale))))
-                    cr = max(3, int(round(3.5 / scale)))
-                    draw.ellipse((cx - cr, cy - cr, cx + cr, cy + cr), fill="#00FFFF")
-                except (ValueError, TypeError):
-                    pass
+        if self.show_contour_var.get():
+            canvas.create_line(coords, fill="#000000", width=3, tags=("overlay",))
+            canvas.create_line(coords, fill=color, width=1, tags=("overlay",))
+            if self.show_points_var.get():
+                r = 3
+                for x, y in pts:
+                    sx, sy = x * scale, y * scale
+                    canvas.create_oval(sx - r, sy - r, sx + r, sy + r,
+                                       fill="#FF0055", outline="#FFFFFF", tags=("overlay",))
 
-        if self.show_ruler_var.get():
-            rec = self.records[self.filtered_indices[self.current_f_idx]]
-            try:
-                mm_per_px = float(rec.get("mm_per_px", "").replace(",", "."))
-                if mm_per_px > 0:
-                    px_per_mm = 1.0 / mm_per_px
-                    ruler_x = 10
-                    draw.line([(ruler_x, 10), (ruler_x, h_orig - 10)], fill="#FFFFFF", width=2)
-                    y, mm = 10.0, 0
-                    while y < h_orig - 10:
-                        tick_len = 10 if mm % 5 == 0 else 5
-                        draw.line([(ruler_x, y), (ruler_x + tick_len, y)], fill="#FFFFFF", width=1)
-                        if mm % 5 == 0 and mm > 0:
-                            draw.text((ruler_x + 12, y - 5), str(mm), fill="#FFFFFF")
-                        y += px_per_mm
-                        mm += 1
-            except (ValueError, TypeError):
-                pass
+        if self.show_axis_var.get() and self.show_contour_var.get():
+            ang = self._parse_float(self._current_record().get("angle_deg"))
+            if ang is not None:
+                cx = sum(p[0] for p in pts) / len(pts) * scale
+                cy = sum(p[1] for p in pts) / len(pts) * scale
+                rad = math.radians(ang)
+                axis_len = max(img.size) * 0.4
+                dx, dy = math.cos(rad) * axis_len, math.sin(rad) * axis_len
+                canvas.create_line(cx - dx, cy - dy, cx + dx, cy + dy,
+                                   fill="#00FFFF", width=1, dash=(6, 3), tags=("overlay",))
+                cr = 4
+                canvas.create_oval(cx - cr, cy - cr, cx + cr, cy + cr,
+                                   fill="#00FFFF", outline="", tags=("overlay",))
+
+    @staticmethod
+    def _parse_float(value: Any) -> float | None:
+        try:
+            f = float(str(value).replace(",", ".").strip())
+        except (TypeError, ValueError):
+            return None
+        return f if math.isfinite(f) else None

@@ -1,13 +1,17 @@
 """Zoomable canvas widget shared by all GUI applications."""
 from __future__ import annotations
 
+import threading
 import tkinter as tk
+from collections import OrderedDict
 from tkinter import ttk
 from typing import Callable
 
 from PIL import Image, ImageTk
 
-RESAMPLE = Image.Resampling.LANCZOS
+# BILINEAR is ~5-10x faster than LANCZOS; for a screen preview the visual
+# difference is negligible and this is what made switching seeds feel slow.
+RESAMPLE = Image.Resampling.BILINEAR
 
 MIN_ZOOM = 0.02
 MAX_ZOOM = 32.0
@@ -16,6 +20,99 @@ FIT_PADDING = 26
 MAX_DISPLAY_DIM = 12000
 MAX_FALLBACK_W = 1100
 MAX_FALLBACK_H = 800
+
+# Decoded full-size images are cached (LRU) so that navigating back and
+# forth between seeds never hits the disk / JPEG decoder again.
+SOURCE_CACHE_MAX_BYTES = 256 * 1024 * 1024  # ~256 MB of decoded RGB images
+
+
+class _SourceCache:
+    """Small thread-safe LRU cache for decoded source images."""
+
+    def __init__(self, max_bytes: int) -> None:
+        self._max_bytes = max_bytes
+        self._bytes = 0
+        self._items: OrderedDict[str, Image.Image] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, path: str) -> Image.Image | None:
+        with self._lock:
+            img = self._items.get(path)
+            if img is not None:
+                self._items.move_to_end(path)
+            return img
+
+    def put(self, path: str, img: Image.Image) -> None:
+        size = img.width * img.height * len(img.getbands())
+        if size > self._max_bytes:
+            return
+        with self._lock:
+            if path in self._items:
+                self._bytes -= self._items[path].width * self._items[path].height * len(self._items[path].getbands())
+                del self._items[path]
+            self._items[path] = img
+            self._bytes += size
+            while self._bytes > self._max_bytes and len(self._items) > 1:
+                _, old = self._items.popitem(last=False)
+                self._bytes -= old.width * old.height * len(old.getbands())
+
+
+_SOURCE_CACHE = _SourceCache(SOURCE_CACHE_MAX_BYTES)
+
+
+def load_image_async(
+    path: str,
+    callback: Callable[[Image.Image | None], None],
+    canvas: tk.Misc,
+    generation: int = 0,
+) -> None:
+    """Decode *path* off the UI thread and hand the result to *callback*.
+
+    The callback is invoked via ``after_idle`` on the Tk main thread (using
+    *canvas* as the event-queue anchor), so it may touch widgets safely.  If
+    the image is already in the cache the callback fires synchronously
+    (instant navigation through the history).  A stale background decode (the
+    user switched again meanwhile) is dropped by comparing *generation*
+    numbers in the caller.
+    """
+    cached = _SOURCE_CACHE.get(path)
+    if cached is not None:
+        callback(cached.copy())
+        return
+
+    # Deliver results through the canvas event queue (thread-safe `after`);
+    # tkinter itself forbids calling widget methods from other threads, but
+    # scheduling an idle callback is explicitly allowed.
+    app_root = canvas.winfo_toplevel()
+
+    def _worker() -> None:
+        img: Image.Image | None = None
+        try:
+            with Image.open(path) as fh:
+                if max(fh.width, fh.height) > 4096:
+                    fh.draft("RGB", (4096, 4096))
+                img = fh.convert("RGB")
+                img.load()
+        except Exception:
+            img = None
+        if img is not None:
+            _SOURCE_CACHE.put(path, img)
+            payload: object = img.copy()
+        else:
+            payload = None
+        try:
+            app_root.after_idle(_deliver, payload)
+        except tk.TclError:
+            pass  # window closed while decoding
+
+    def _deliver(payload: object) -> None:
+        if isinstance(payload, Image.Image):
+            callback(payload)
+        else:
+            callback(None)
+
+    threading.Thread(target=_worker, name="image-decode", daemon=True).start()
+    del generation  # generation bookkeeping lives in the caller
 
 
 class ZoomableCanvas:
@@ -41,12 +138,17 @@ class ZoomableCanvas:
         hbar.grid(row=1, column=0, sticky="ew")
         self.canvas.configure(yscrollcommand=vbar.set, xscrollcommand=hbar.set)
 
+        self._source_image: Image.Image | None = None
         self._image: Image.Image | None = None
         self._tk_image: ImageTk.PhotoImage | None = None
         self.display_scale: float = 1.0
         self.zoom_mode: str = "fit"
         self.zoom_factor: float = 1.0
         self._last_size: tuple[int, int] = (0, 0)
+        # Coalescing handle for deferred renders triggered by Configure /
+        # zoom events: while the user drags a scrollbar or resizes the
+        # window we must NOT resize+convert the photo on every single event.
+        self._render_after_id: str | None = None
         self._on_render: Callable[[], None] | None = None
 
         self.canvas.bind("<Configure>", self._on_configure)
@@ -68,24 +170,88 @@ class ZoomableCanvas:
         self._on_render = cb
 
     def set_image(self, img: Image.Image | None) -> None:
-        self._image = img
+        self._source_image = img
+        if img is None:
+            # keep the previous display scale so that a later redraw_display()
+            # does not work with stale geometry when nothing can be rendered
+            self._image = None
         self.zoom_mode = "fit"
         self.render()
 
     def render(self) -> None:
-        self.canvas.delete("all")
-        if self._image is None:
+        src = self._source_image
+        if src is None:
+            # Nothing to show yet (e.g. window not mapped and no fallback).
+            # Do NOT drop a previously rendered display copy: callers draw
+            # overlays into self.image right after render() returns.
             return
-        w, h = self._image.size
+        if src.mode != "RGB":
+            src = src.convert("RGB")
+            self._source_image = src
+        w, h = src.size
         if w <= 0 or h <= 0:
             return
         scale = self._compute_scale(w, h)
         self.display_scale = scale
         dw, dh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
-        resized = self._image.resize((dw, dh), RESAMPLE) if (dw, dh) != (w, h) else self._image
+        # Resize a pristine copy every time: the source must never be mutated,
+        # otherwise overlays drawn into it would accumulate / disappear between
+        # renders (the aug-inspector contour bug).
+        if (dw, dh) != (w, h):
+            # reduce_l is a lossy integer box-downscale that is several times
+            # faster than a direct big resize; finish with BILINEAR to the
+            # exact target size.  Only used when we shrink by >= 2x.
+            if dw * 2 <= w and dh * 2 <= h:
+                try:
+                    resized = src.reduce(2)
+                except Exception:
+                    resized = src.resize((dw, dh), RESAMPLE)
+                while resized.width >= dw * 2 and resized.height >= dh * 2:
+                    try:
+                        resized = resized.reduce(2)
+                    except Exception:
+                        break
+                resized = resized.resize((dw, dh), RESAMPLE)
+            else:
+                resized = src.resize((dw, dh), RESAMPLE)
+        else:
+            resized = src.copy()
+        self._image = resized
+        self.canvas.delete("all")
         self._tk_image = ImageTk.PhotoImage(resized)
         self.canvas.create_image(0, 0, anchor="nw", image=self._tk_image, tags="base")
         self.canvas.configure(scrollregion=(0, 0, dw, dh))
+        if self._on_render:
+            self._on_render()
+
+    def request_render(self, delay: int = 60) -> None:
+        """Schedule a coalesced render(); repeated calls collapse into one."""
+        if self._render_after_id is not None:
+            try:
+                self.canvas.after_cancel(self._render_after_id)
+            except Exception:
+                pass
+        self._render_after_id = self.canvas.after(delay, self._deferred_render)
+
+    def _deferred_render(self) -> None:
+        self._render_after_id = None
+        self.render()
+
+    def redraw_display(self) -> None:
+        """Re-convert the current display copy (*self._image*) to a PhotoImage.
+
+        Used after somebody drew on ``self.image`` (e.g. the mm ruler): the
+        canvas bitmap is refreshed from the mutated display copy and the
+        render callback re-draws vector overlays on top of it.  The source
+        image stays untouched, so a later ``render()`` starts from clean data.
+        """
+        if self._image is None:
+            return
+        self.canvas.delete("all")
+        self._tk_image = ImageTk.PhotoImage(self._image)
+        self.canvas.create_image(0, 0, anchor="nw", image=self._tk_image, tags="base")
+        w, h = self._image.size
+        self.canvas.configure(scrollregion=(0, 0, max(1, w), max(1, h)))
         if self._on_render:
             self._on_render()
 
@@ -96,14 +262,14 @@ class ZoomableCanvas:
         self._zoom_by(0.8)
 
     def zoom_actual(self) -> None:
-        if self._image is None:
+        if self._source_image is None:
             return
         self.zoom_mode = "manual"
         self.zoom_factor = 1.0
         self.render()
 
     def zoom_fit(self) -> None:
-        if self._image is None:
+        if self._source_image is None:
             return
         self.zoom_mode = "fit"
         self.render()
@@ -114,15 +280,17 @@ class ZoomableCanvas:
     def clear(self) -> None:
         self.canvas.delete("all")
         self._image = None
+        self._source_image = None
         self._tk_image = None
 
     def _zoom_by(self, factor: float) -> None:
-        if self._image is None:
+        if self._source_image is None:
             return
         current = self.display_scale if self.display_scale > 0 else 1.0
         self.zoom_mode = "manual"
         self.zoom_factor = self._clamp(current * factor)
-        self.render()
+        # Wheel bursts (trackpad) would otherwise re-resize the photo per tick.
+        self.request_render(delay=40)
 
     def _clamp(self, scale: float) -> float:
         return max(MIN_ZOOM, min(MAX_ZOOM, float(scale)))
@@ -146,8 +314,10 @@ class ZoomableCanvas:
         if size == self._last_size:
             return
         self._last_size = size
-        if self._image is not None and self.zoom_mode == "fit":
-            self.render()
+        if self._source_image is not None and self.zoom_mode == "fit":
+            # Defer: during live window resizing this fires dozens of times
+            # per second and each immediate render() froze the UI.
+            self.request_render()
 
     def _on_ctrl_wheel(self, event: tk.Event) -> None:
         self._zoom_by(1.25 if event.delta > 0 else 0.8)
