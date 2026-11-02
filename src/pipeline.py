@@ -23,6 +23,7 @@ from core.contour_io import load_contour
 from core.csv_utils import read_csv_robust, write_csv
 from core.io_utils import imread_unicode, imwrite_unicode
 from core.models import AUG_EXTRA_FIELDS
+from core.seed_geometry import compute_median_color_hex
 
 log = logging.getLogger(__name__)
 
@@ -132,6 +133,7 @@ def augment_seed(
         r["file_index"] = new_fi
         if angle_old is not None:
             r["angle_deg"] = f"{transform_angle(angle_old, A):.3f}"
+        r["color_hex"] = compute_median_color_hex(im2, pts2)
         r.update({"source": src_name, "split": "train", "is_aug": 1, "aug_of": fi})
         aug_rows.append(r)
     return aug_rows
@@ -152,6 +154,8 @@ def run_augmentation(
     is_same_dir = os.path.abspath(src) == os.path.abspath(dst)
 
     out_fields = [f for f in fields if f not in ("length_mm", "width_mm")]
+    if "color_hex" not in out_fields:
+        out_fields.append("color_hex")
     for name in AUG_EXTRA_FIELDS:
         if name not in out_fields:
             out_fields.append(name)
@@ -187,6 +191,8 @@ def run_augmentation(
         r0 = dict(row)
         r0.pop("length_mm", None)
         r0.pop("width_mm", None)
+        if not r0.get("color_hex"):
+            r0["color_hex"] = compute_median_color_hex(img, pts)
         r0.update({"source": src_name, "split": "train", "is_aug": 0, "aug_of": ""})
         out_rows.append(r0)
         n_orig += 1

@@ -15,6 +15,7 @@ from core.csv_utils import read_csv_robust, write_csv
 import re
 from core.io_utils import fmt_float
 from core.models import AUG_EXTRA_FIELDS, DEFAULT_CSV_FIELDS, EXTRA_EDITABLE_FIELDS, IMAGE_EXTENSIONS, SKIP_CSV_FIELDS
+from core.seed_geometry import compute_median_color_hex
 from gui.common.file_scan import scan_directory
 from gui.common.ruler import draw_canvas_ruler, draw_mm_ruler
 from gui.common.zoomable import ZoomableCanvas, load_image_async, RESAMPLE
@@ -330,11 +331,23 @@ class InspectionApp:
         self.edge_width_var = add_readonly("Ширина края, px:", row); row += 1
         self.mm_per_px_var = add_readonly("мм/пиксель:", row); row += 1
 
+        ttk.Label(form, text="Цвет:").grid(row=row, column=0, sticky="w", padx=(0, 10), pady=3)
+        color_frame = ttk.Frame(form)
+        color_frame.grid(row=row, column=1, sticky="ew", pady=3)
+        self.color_hex_var = tk.StringVar()
+        self.color_entry = ttk.Entry(color_frame, textvariable=self.color_hex_var, state="readonly", width=10)
+        self.color_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.color_badge = tk.Frame(color_frame, width=30, height=20, relief="solid", bd=1, bg="#FFFFFF")
+        self.color_badge.pack(side=tk.LEFT, padx=(6, 0))
+        self.color_badge.pack_propagate(False)
+        row += 1
+
         self._readonly_vars = {
             "file_index": self.file_index_var, "index": self.index_var,
             "length_px": self.length_px_var, "width_px": self.width_px_var,
             "angle_deg": self.angle_var, "area_px": self.area_var,
             "edge_width_px": self.edge_width_var, "mm_per_px": self.mm_per_px_var,
+            "color_hex": self.color_hex_var,
         }
 
         self._entry_vars = {
@@ -422,14 +435,45 @@ class InspectionApp:
             self.btn_prev.config(state="disabled")
             self.btn_next.config(state="disabled")
 
+    def _update_color_badge(self, hex_code: str) -> None:
+        if not hasattr(self, "color_badge"):
+            return
+        code = str(hex_code).strip()
+        if re.match(r"^#[0-9A-Fa-f]{6}$", code):
+            try:
+                self.color_badge.configure(bg=code)
+                return
+            except Exception:
+                pass
+        self.color_badge.configure(bg="#F0F0F0")
+
+    def _recompute_current_color(self) -> str:
+        """Compute median color from current image and contour points."""
+        src_img = getattr(self.zoom_widget, "_source_image", None) or self.zoom_widget.image
+        if src_img is None or not self.contour_points or len(self.contour_points) < 3:
+            return ""
+        return compute_median_color_hex(src_img, self.contour_points)
+
+    def _on_contour_modified(self) -> None:
+        """Update live color display when contour is changed."""
+        src_img = getattr(self.zoom_widget, "_source_image", None) or self.zoom_widget.image
+        if not self.records or src_img is None or len(self.contour_points) < 3:
+            return
+        hex_code = self._recompute_current_color()
+        if hex_code:
+            self.color_hex_var.set(hex_code)
+            self._update_color_badge(hex_code)
+
     def _update_form(self) -> None:
         if not self.records:
             for var in [*self._readonly_vars.values(), *self._entry_vars.values(), self.status_var, self.shape_var]:
                 var.set("")
+            self._update_color_badge("")
             return
         record = self.records[self.current]
         for key, var in self._readonly_vars.items():
             var.set(record.get(key, ""))
+        self._update_color_badge(self.color_hex_var.get())
         for key, var in self._entry_vars.items():
             var.set(record.get(key, ""))
         if not self.length_var.get() and record.get("length_px") and record.get("mm_per_px"):
@@ -493,12 +537,25 @@ class InspectionApp:
                     return
                 self.zoom_widget.set_image(img if img is not None else self._make_placeholder(record))
                 self._draw_contour_overlay()
+                if not record.get("color_hex") and self.contour_points:
+                    c_hex = self._recompute_current_color()
+                    if c_hex:
+                        record["color_hex"] = c_hex
+                        self.color_hex_var.set(c_hex)
+                        self._update_color_badge(c_hex)
             load_image_async(image_path, on_img, self.zoom_widget.canvas)
         else:
             self.zoom_widget.set_image(self._make_placeholder(record))
 
         # 3. Explicitly trigger overlay draw (for synchronous cached loads or immediate display)
         self._draw_contour_overlay()
+        src_img = getattr(self.zoom_widget, "_source_image", None) or self.zoom_widget.image
+        if not record.get("color_hex") and self.contour_points and src_img is not None:
+            c_hex = self._recompute_current_color()
+            if c_hex:
+                record["color_hex"] = c_hex
+                self.color_hex_var.set(c_hex)
+                self._update_color_badge(c_hex)
 
     def _load_contour_file(self, path: str) -> bool:
         """Read contour points from *path*; return True on success."""
@@ -706,6 +763,7 @@ class InspectionApp:
     def _on_left_release(self, event: tk.Event) -> None:
         if self.drag_point_index is not None:
             self.drag_point_index = None
+            self._on_contour_modified()
             return "break"
 
     @staticmethod
@@ -769,6 +827,7 @@ class InspectionApp:
         self.contour_points.insert(self._insertion_index(pt), pt)
         self.contour_dirty = True
         self._draw_contour_overlay()
+        self._on_contour_modified()
         return "break"
 
     def _on_right_click(self, event: tk.Event) -> None:
@@ -780,10 +839,12 @@ class InspectionApp:
             del self.contour_points[idx]
             self.contour_dirty = True
             self._draw_contour_overlay()
+            self._on_contour_modified()
         return "break"
 
     def _save_contour(self, show_message: bool = False) -> bool:
-        if self.contour_path is None or self.zoom_widget.image is None:
+        src_img = getattr(self.zoom_widget, "_source_image", None) or self.zoom_widget.image
+        if self.contour_path is None or src_img is None:
             if show_message:
                 messagebox.showwarning("Сохранение контура", "Нет данных для сохранения.")
             return False
@@ -797,7 +858,7 @@ class InspectionApp:
             payload.update({"file_index": fi, "points_space": payload.get("points_space", "crop")})
             if str(record.get("index", "")).strip():
                 payload["index"] = record["index"]
-            w, h = self.zoom_widget.image.size
+            w, h = src_img.size
             payload["image_width"], payload["image_height"] = int(w), int(h)
             payload["points"] = [[int(round(x)), int(round(y))] for x, y in self.contour_points]
             out_dir = os.path.dirname(self.contour_path)
@@ -806,6 +867,18 @@ class InspectionApp:
             with open(self.contour_path, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh, ensure_ascii=False, indent=2)
             self.contour_dirty = False
+
+            # Recalculate color from modified contour and update record + UI
+            hex_code = self._recompute_current_color()
+            if hex_code:
+                record["color_hex"] = hex_code
+                self.color_hex_var.set(hex_code)
+                self._update_color_badge(hex_code)
+
+            # Persist updated color to seeds.csv
+            if self.output_path:
+                self._write_csv(self.output_path, show_message=False)
+
             if show_message:
                 messagebox.showinfo("Сохранение контура", f"Контур сохранён:\n{self.contour_path}")
             return True
@@ -924,7 +997,7 @@ class InspectionApp:
                     names.append(key)
         return [n for n in names if n not in SKIP_CSV_FIELDS and n not in ("length_mm", "width_mm")]
 
-    def _write_csv(self, path: str) -> bool:
+    def _write_csv(self, path: str, show_message: bool = True) -> bool:
         try:
             fieldnames = self._get_fieldnames()
             orig_map = {r.get("file_index"): r for r in self.records if r.get("file_index")}
@@ -935,6 +1008,8 @@ class InspectionApp:
                     for prop in ("status", "shape", "thickness_mm", "mass_g"):
                         if prop in parent:
                             aug[prop] = parent[prop]
+                    if not aug.get("color_hex") and parent.get("color_hex"):
+                        aug["color_hex"] = parent["color_hex"]
 
             rows_to_save = list(self.records) + getattr(self, "aug_records", [])
             rows = [{key: record.get(key, "") for key in fieldnames} for record in rows_to_save]
@@ -943,10 +1018,12 @@ class InspectionApp:
             self.unsaved = False
             self.dirty = False
             self._update_statusbar()
-            messagebox.showinfo("Сохранение", f"CSV сохранён:\n{path}")
+            if show_message:
+                messagebox.showinfo("Сохранение", f"CSV сохранён:\n{path}")
             return True
         except Exception as exc:
-            messagebox.showerror("Ошибка сохранения", str(exc))
+            if show_message:
+                messagebox.showerror("Ошибка сохранения", str(exc))
             return False
 
     def _update_statusbar(self) -> None:

@@ -73,6 +73,7 @@ def load_image_async(
         return
 
     app_root = canvas.winfo_toplevel()
+    result_box: list[object] = []
 
     def _worker() -> None:
         img: Image.Image | None = None
@@ -86,21 +87,31 @@ def load_image_async(
             img = None
         if img is not None:
             _SOURCE_CACHE.put(path, img)
-            payload: object = img.copy()
+            result_box.append(img.copy())
         else:
-            payload = None
-        try:
-            app_root.after_idle(_deliver, payload)
-        except tk.TclError:
-            pass
+            result_box.append(None)
 
-    def _deliver(payload: object) -> None:
-        if isinstance(payload, Image.Image):
-            callback(payload)
-        else:
-            callback(None)
+    def _check_result() -> None:
+        if not app_root.winfo_exists():
+            return
+        if result_box:
+            payload = result_box[0]
+            if isinstance(payload, Image.Image):
+                callback(payload)
+            else:
+                callback(None)
+        elif t.is_alive():
+            try:
+                app_root.after(15, _check_result)
+            except Exception:
+                pass
 
-    threading.Thread(target=_worker, name="image-decode", daemon=True).start()
+    t = threading.Thread(target=_worker, name="image-decode", daemon=True)
+    t.start()
+    try:
+        app_root.after(10, _check_result)
+    except Exception:
+        pass
     del generation
 
 

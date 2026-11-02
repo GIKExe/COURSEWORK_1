@@ -17,6 +17,11 @@ def points_to_contour(points: Iterable[Any] | None) -> np.ndarray | None:
     """Convert a heterogeneous point list to an (N, 1, 2) int32 contour."""
     if points is None:
         return None
+    if isinstance(points, np.ndarray):
+        arr = points.reshape(-1, 2)
+        if len(arr) >= 3:
+            return arr.astype(np.int32).reshape(-1, 1, 2)
+        return None
     pts: list[tuple[int, int]] = []
     for point in points:
         try:
@@ -153,6 +158,76 @@ def length_axis(contour: np.ndarray | None) -> tuple[float, float, float] | None
     return dist, angle, dist
 
 
+def compute_median_rgb(
+    image: np.ndarray | Any,
+    contour: Any,
+    *,
+    is_rgb: bool = False,
+) -> tuple[int, int, int] | None:
+    """Compute median R, G, B of pixels inside the contour.
+
+    Robust to specular reflections, shadows and noise.
+    Accepts cv2 BGR/RGB ndarray or PIL Image, and contour as (N, 1, 2) / (N, 2) ndarray
+    or list of points/dicts.
+    """
+    if image is None or contour is None:
+        return None
+    if hasattr(image, "convert") and not isinstance(image, np.ndarray):
+        arr = np.asarray(image.convert("RGB"))
+        is_rgb = True
+    else:
+        arr = np.asarray(image)
+        if arr.ndim < 3 or arr.shape[2] < 3:
+            return None
+
+    pts = points_to_contour(contour)
+    if pts is None:
+        return None
+    pts = pts.reshape(-1, 2)
+    if len(pts) < 3:
+        return None
+
+    img_h, img_w = arr.shape[:2]
+    x, y, w, h = cv2.boundingRect(pts.reshape(-1, 1, 2))
+    x0, y0 = max(0, int(x)), max(0, int(y))
+    x1, y1 = min(img_w, int(x + w)), min(img_h, int(y + h))
+    if x1 <= x0 or y1 <= y0:
+        return None
+
+    crop = arr[y0:y1, x0:x1]
+    mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
+    shifted = (pts - np.array([x0, y0], dtype=np.int32)).reshape(-1, 1, 2)
+    cv2.drawContours(mask, [shifted], -1, 255, thickness=cv2.FILLED)
+
+    valid_pixels = crop[mask > 0]
+    if valid_pixels.size == 0 or len(valid_pixels) == 0:
+        return None
+
+    med = np.median(valid_pixels[:, :3], axis=0)
+    if is_rgb:
+        r, g, b = int(round(med[0])), int(round(med[1])), int(round(med[2]))
+    else:
+        b, g, r = int(round(med[0])), int(round(med[1])), int(round(med[2]))
+
+    r = max(0, min(255, r))
+    g = max(0, min(255, g))
+    b = max(0, min(255, b))
+    return r, g, b
+
+
+def compute_median_color_hex(
+    image: np.ndarray | Any,
+    contour: Any,
+    *,
+    is_rgb: bool = False,
+) -> str:
+    """Compute median color of seed inside contour and format as uppercase '#RRGGBB'."""
+    rgb = compute_median_rgb(image, contour, is_rgb=is_rgb)
+    if rgb is None:
+        return ""
+    return f"#{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
+
+
 def rgb_averaged(image_bgr: np.ndarray, contour: np.ndarray | None) -> tuple[float, float, float] | None:
     """Mean R, G, B over the pixels strictly *inside* the contour."""
     if image_bgr is None or contour is None:
@@ -271,7 +346,7 @@ def compute_seed_metrics(
     Returns a dict with ``rgb_averaged``, ``groove`` (0/1) and the length-axis
     measurements (``length_px`` / ``angle_deg`` plus the endpoint coordinates).
     """
-    result: dict[str, Any] = {"rgb_averaged": None, "groove": None, "groove_score": 0.0}
+    result: dict[str, Any] = {"rgb_averaged": None, "color_hex": "", "groove": None, "groove_score": 0.0}
     axis = length_axis(contour)
     if axis is not None:
         length_px, angle_deg, dist = axis
@@ -281,6 +356,7 @@ def compute_seed_metrics(
     rgb = rgb_averaged(image_bgr, contour)
     if rgb is not None:
         result["rgb_averaged"] = f"{rgb[0]:.1f};{rgb[1]:.1f};{rgb[2]:.1f}"
+    result["color_hex"] = compute_median_color_hex(image_bgr, contour, is_rgb=False)
     score = groove_score(image_bgr, contour, angle_hint=angle_hint)
     result["groove_score"] = round(score, 3)
     if rgb is not None or axis is not None:
