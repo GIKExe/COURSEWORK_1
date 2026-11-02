@@ -34,7 +34,7 @@ STATUS_NAMES_RU: dict[SeedStatus, str] = {
 IMAGE_EXTENSIONS: tuple[str, ...] = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
 
 DEFAULT_CSV_FIELDS: list[str] = [
-    "file_index", "index", "status", "edge_width_px",
+    "file_index", "index", "status", "color_hex", "edge_width_px",
     "length_px", "width_px", "angle_deg", "area_px",
     "mm_per_px",
 ]
@@ -70,6 +70,7 @@ class SeedItem(SeedCandidate, total=False):
     angle_deg: float
     edge_width: float | None
     status: str
+    color_hex: str
     index: int
 
 

@@ -1,4 +1,4 @@
-"""Seed measurement statistics and status counting."""
+"""Seed measurement statistics, status counting, and photometric measurements."""
 from __future__ import annotations
 
 from typing import Any
@@ -6,6 +6,16 @@ from typing import Any
 import numpy as np
 
 from core.models import SeedItem, SizeStats, StatusCounts
+from core.seed_geometry import compute_median_color_hex, compute_median_rgb
+
+__all__ = [
+    "compute_size_stats",
+    "format_size_stats",
+    "count_seed_statuses",
+    "format_seed_status_message",
+    "compute_median_rgb",
+    "compute_median_color_hex",
+]
 
 
 def compute_size_stats(items: list[SeedItem], mm_per_px: float | None = None) -> SizeStats | None:

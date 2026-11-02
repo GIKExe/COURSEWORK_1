@@ -11,6 +11,7 @@ from core.contour_io import save_contour_json
 from core.csv_utils import update_seeds_csv
 from core.io_utils import fmt_float, imwrite_unicode, sanitize_filename
 from core.models import ExportSummary, SeedItem
+from core.seed_geometry import compute_median_color_hex
 
 
 def make_source_name(image_path: str) -> str:
@@ -82,13 +83,16 @@ def build_seed_csv_row(
     file_index: str,
     seed_index: int,
     mm_per_px: float | None,
+    color_hex: str = "",
 ) -> dict[str, Any]:
     length_px = item.get("length_px")
     width_px = item.get("width_px")
+    c_hex = color_hex or str(item.get("color_hex") or "")
     return {
         "file_index": file_index,
         "index": seed_index,
         "status": str(item.get("status", "unknown")),
+        "color_hex": c_hex,
         "edge_width_px": fmt_float(item.get("edge_width"), 3),
         "length_px": fmt_float(length_px, 3),
         "width_px": fmt_float(width_px, 3),
@@ -169,7 +173,10 @@ def export_seed_items(
             summary["contour_errors"] += 1
         summary["saved"] += 1
         summary["saved_file_indexes"].append(file_index)
-        saved_rows.append(build_seed_csv_row(item, file_index, seed_index, mm_per_px))
+        color_hex = str(item.get("color_hex") or "")
+        if not color_hex and item.get("contour") is not None:
+            color_hex = compute_median_color_hex(image_bgr, item.get("contour"))
+        saved_rows.append(build_seed_csv_row(item, file_index, seed_index, mm_per_px, color_hex=color_hex))
 
     try:
         remove_group_files_except(out_dir, source_name, summary["saved_file_indexes"])

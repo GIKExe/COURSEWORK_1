@@ -240,7 +240,7 @@ class AugInspectionApp:
 
         data_group = ttk.LabelFrame(parent, text="Физические замеры", padding=6)
         data_group.pack(fill=tk.BOTH, expand=True)
-        rows = [("file_index", "Файл:"), ("index", "Номер:"), ("status", "Статус:"), ("angle_deg", "Угол, °:"),
+        rows = [("file_index", "Файл:"), ("index", "Номер:"), ("status", "Статус:"), ("color_hex", "Цвет:"), ("angle_deg", "Угол, °:"),
                 ("length_mm", "Длина, мм:"), ("width_mm", "Ширина, мм:"), ("thickness_mm", "Толщина, мм:"),
                 ("mass_g", "Масса, г:"), ("shape", "Форма:"), ("length_px", "Длина, px:"), ("width_px", "Ширина, px:"),
                 ("area_px", "Площадь, px:"), ("edge_width_px", "Край, px:"), ("mm_per_px", "мм/px:")]

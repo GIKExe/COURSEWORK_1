@@ -348,6 +348,7 @@ def process_image(img_bgr: np.ndarray, params: dict[str, Any]) -> ProcessResult:
             length_px=length_px, width_px=width_px,
             angle_deg=angle_deg, edge_width=ew, status=status,
             rgb_averaged=metrics.get("rgb_averaged"),
+            color_hex=metrics.get("color_hex", ""),
             groove=metrics.get("groove"),
             groove_score=metrics.get("groove_score"),
         )
