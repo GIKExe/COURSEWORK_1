@@ -31,18 +31,20 @@ def run_gui(initial_screen: str = "segmentation") -> None:
     screen: str | None = initial_screen
     current_out_dir: str = DEFAULT_OUT_DIR
     current_seed_index: int = 0
+    current_file_index: str | None = None
 
     while screen:
         next_screen: list[str | None] = [None]
         root = tk.Tk()
         _setup_tk_defaults(root)
         
-        def switch(target: str, data_dir: str | None = None, seed_index: int = 0) -> None:
-            nonlocal screen, current_out_dir, current_seed_index
+        def switch(target: str, data_dir: str | None = None, seed_index: int = 0, file_index: str | None = None) -> None:
+            nonlocal screen, current_out_dir, current_seed_index, current_file_index
             next_screen[0] = target
             if data_dir:
                 current_out_dir = data_dir
             current_seed_index = seed_index
+            current_file_index = file_index
             root.destroy()
 
         app = None
@@ -52,10 +54,10 @@ def run_gui(initial_screen: str = "segmentation") -> None:
                 app = SegmentationApp(root, current_out_dir, switch_callback=switch)
             case "inspection":
                 from gui.inspection_app import InspectionApp
-                app = InspectionApp(root, current_out_dir, switch_callback=switch, initial_index=current_seed_index)
+                app = InspectionApp(root, current_out_dir, switch_callback=switch, initial_index=current_seed_index, initial_file_index=current_file_index)
             case "aug_inspection":
                 from gui.aug_inspection_app import AugInspectionApp
-                app = AugInspectionApp(root, current_out_dir, switch_callback=switch, initial_index=current_seed_index)
+                app = AugInspectionApp(root, current_out_dir, switch_callback=switch, initial_index=current_seed_index, initial_file_index=current_file_index)
             case _:
                 root.destroy()
                 break

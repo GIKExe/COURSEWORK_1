@@ -12,8 +12,9 @@ from PIL import Image, ImageDraw
 
 from core.contour_io import parse_raw_points
 from core.csv_utils import read_csv_robust, write_csv
+import re
 from core.io_utils import fmt_float
-from core.models import DEFAULT_CSV_FIELDS, EXTRA_EDITABLE_FIELDS, IMAGE_EXTENSIONS, SKIP_CSV_FIELDS
+from core.models import AUG_EXTRA_FIELDS, DEFAULT_CSV_FIELDS, EXTRA_EDITABLE_FIELDS, IMAGE_EXTENSIONS, SKIP_CSV_FIELDS
 from gui.common.file_scan import scan_directory
 from gui.common.ruler import draw_canvas_ruler, draw_mm_ruler
 from gui.common.zoomable import ZoomableCanvas, load_image_async, RESAMPLE
@@ -54,12 +55,15 @@ class InspectionApp:
         data_dir: str,
         switch_callback: Callable[..., None] | None = None,
         initial_index: int = 0,
+        initial_file_index: str | None = None,
     ) -> None:
         self.root = root
         self.data_dir = os.path.abspath(data_dir)
         self._switch = switch_callback
         self.initial_index = initial_index
+        self.initial_file_index = initial_file_index
         self.records: list[dict[str, str]] = []
+        self.aug_records: list[dict[str, str]] = []
         self.fieldnames: list[str] = []
         self.current = initial_index
         self.output_path: str = os.path.join(self.data_dir, "seeds.csv")
@@ -89,7 +93,15 @@ class InspectionApp:
         def _startup() -> None:
             self._load_data()
             if self.records:
-                self.current = min(max(0, self.initial_index), len(self.records) - 1)
+                if self.initial_file_index:
+                    for i, r in enumerate(self.records):
+                        if r.get("file_index") == self.initial_file_index:
+                            self.current = i
+                            break
+                    else:
+                        self.current = min(max(0, self.initial_index), len(self.records) - 1)
+                else:
+                    self.current = min(max(0, self.initial_index), len(self.records) - 1)
             self._update_all()
         self.root.after_idle(_startup)
 
@@ -112,11 +124,21 @@ class InspectionApp:
             if col not in self.fieldnames:
                 self.fieldnames.append(col)
         self.records = []
+        self.aug_records = []
         for row in rows:
             clean = {k: ("" if v is None else str(v).strip()) for k, v in row.items() if k is not None}
             for col in self.fieldnames:
                 clean.setdefault(col, "")
-            self.records.append(clean)
+            fi = clean.get("file_index", "")
+            is_aug = (
+                str(clean.get("is_aug", "0")).strip() in ("1", "True", "true")
+                or bool(clean.get("aug_of", "").strip())
+                or bool(re.search(r"_aug\d+$", fi))
+            )
+            if is_aug:
+                self.aug_records.append(clean)
+            else:
+                self.records.append(clean)
         shape_set: set[str] = set()
         status_set: set[str] = set()
         for r in self.records:
@@ -243,7 +265,8 @@ class InspectionApp:
             if ans and not self._save_contour(show_message=False):
                 return
         if self._switch:
-            self._switch(target, self.data_dir, self.current)
+            cur_fi = self.records[self.current].get("file_index") if self.records and 0 <= self.current < len(self.records) else None
+            self._switch(target, self.data_dir, self.current, cur_fi)
 
     def _choose_folder(self) -> None:
         d = filedialog.askdirectory(initialdir=self.data_dir, title="Выберите папку с семенами (out)")
@@ -891,6 +914,10 @@ class InspectionApp:
         for name in self.fieldnames:
             if name not in SKIP_CSV_FIELDS and name not in names:
                 names.append(name)
+        if getattr(self, "aug_records", None):
+            for name in AUG_EXTRA_FIELDS:
+                if name not in SKIP_CSV_FIELDS and name not in names:
+                    names.append(name)
         for record in self.records:
             for key in record:
                 if key not in SKIP_CSV_FIELDS and key not in names:
@@ -900,7 +927,17 @@ class InspectionApp:
     def _write_csv(self, path: str) -> bool:
         try:
             fieldnames = self._get_fieldnames()
-            rows = [{key: record.get(key, "") for key in fieldnames} for record in self.records]
+            orig_map = {r.get("file_index"): r for r in self.records if r.get("file_index")}
+            for aug in getattr(self, "aug_records", []):
+                parent_fi = aug.get("aug_of")
+                if parent_fi in orig_map:
+                    parent = orig_map[parent_fi]
+                    for prop in ("status", "shape", "thickness_mm", "mass_g"):
+                        if prop in parent:
+                            aug[prop] = parent[prop]
+
+            rows_to_save = list(self.records) + getattr(self, "aug_records", [])
+            rows = [{key: record.get(key, "") for key in fieldnames} for record in rows_to_save]
             write_csv(path, fieldnames, rows)
             self.output_path = path
             self.unsaved = False

@@ -30,11 +30,13 @@ class AugInspectionApp:
         data_dir: str,
         switch_callback: Callable[..., None] | None = None,
         initial_index: int = 0,
+        initial_file_index: str | None = None,
     ) -> None:
         self.root = root
         self.data_dir = os.path.abspath(data_dir)
         self._switch = switch_callback
         self.initial_index = initial_index
+        self.initial_file_index = initial_file_index
         self.records: list[dict[str, str]] = []
         self.filtered_indices: list[int] = []
         self.current_f_idx = 0
@@ -75,10 +77,11 @@ class AugInspectionApp:
         except Exception as exc:
             messagebox.showerror("Ошибка парсинга CSV", str(exc))
             return
-        self._apply_filter()
+        self._apply_filter(preserve_file_index=self.initial_file_index)
         if self.filtered_indices:
-            self.current_f_idx = min(max(0, initial_idx), len(self.filtered_indices) - 1)
-            self._update_current_view()
+            if not self.initial_file_index:
+                self.current_f_idx = min(max(0, initial_idx), len(self.filtered_indices) - 1)
+            self._update_view()
         self.status_var.set(f"Загружено {len(self.records)} записей. Папка: {folder}")
 
     def _apply_filter(self, preserve_file_index: str | None = None) -> None:
@@ -201,8 +204,10 @@ class AugInspectionApp:
 
     def _nav(self, target: str) -> None:
         if self._switch:
+            raw_rec = self._current_record()
+            parent_fi = raw_rec.get("aug_of") or raw_rec.get("file_index")
             raw_idx = self.filtered_indices[self.current_f_idx] if self.filtered_indices else 0
-            self._switch(target, self.data_dir, raw_idx)
+            self._switch(target, self.data_dir, raw_idx, parent_fi)
 
     def _build_info_panel(self, parent: ttk.Frame) -> None:
         vis_group = ttk.LabelFrame(parent, text="Отображение контура", padding=6)
