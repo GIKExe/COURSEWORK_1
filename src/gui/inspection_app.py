@@ -15,7 +15,7 @@ from core.csv_utils import read_csv_robust, write_csv
 from core.io_utils import fmt_float
 from core.models import DEFAULT_CSV_FIELDS, EXTRA_EDITABLE_FIELDS, IMAGE_EXTENSIONS, SKIP_CSV_FIELDS
 from gui.common.file_scan import scan_directory
-from gui.common.ruler import draw_mm_ruler
+from gui.common.ruler import draw_canvas_ruler, draw_mm_ruler
 from gui.common.zoomable import ZoomableCanvas, load_image_async, RESAMPLE
 
 POINT_HANDLE_RADIUS = 5
@@ -48,14 +48,21 @@ def format_number(value: float | None) -> str:
 class InspectionApp:
     """Seed parameter inspection and contour editing."""
 
-    def __init__(self, root: tk.Tk, data_dir: str, switch_callback: Callable[[str], None] | None = None) -> None:
+    def __init__(
+        self,
+        root: tk.Tk,
+        data_dir: str,
+        switch_callback: Callable[..., None] | None = None,
+        initial_index: int = 0,
+    ) -> None:
         self.root = root
-        self.data_dir = data_dir
+        self.data_dir = os.path.abspath(data_dir)
         self._switch = switch_callback
+        self.initial_index = initial_index
         self.records: list[dict[str, str]] = []
         self.fieldnames: list[str] = []
-        self.current = 0
-        self.output_path: str | None = None
+        self.current = initial_index
+        self.output_path: str = os.path.join(self.data_dir, "seeds.csv")
         self.dirty = False
         self.unsaved = False
         self.load_error: str | None = None
@@ -81,6 +88,8 @@ class InspectionApp:
         # first frame was ever drawn.
         def _startup() -> None:
             self._load_data()
+            if self.records:
+                self.current = min(max(0, self.initial_index), len(self.records) - 1)
             self._update_all()
         self.root.after_idle(_startup)
 
@@ -88,8 +97,11 @@ class InspectionApp:
         self.image_files, self.json_files = scan_directory(self.data_dir)
         csv_path = os.path.join(self.data_dir, "seeds.csv")
         if not os.path.isfile(csv_path):
-            self.load_error = f"Файл не найден: {csv_path}"
+            csv_path = os.path.join(self.data_dir, "seeds_edited.csv")
+        if not os.path.isfile(csv_path):
+            self.load_error = f"Файл не найден: {os.path.join(self.data_dir, 'seeds.csv')}"
             return
+        self.output_path = csv_path
         try:
             fieldnames, rows = read_csv_robust(csv_path)
         except Exception as exc:
@@ -123,12 +135,28 @@ class InspectionApp:
         self.statusbar = ttk.Label(self.root, text="Загрузка...", anchor="w", padding=(8, 3), relief="sunken")
         self.statusbar.pack(side=tk.BOTTOM, fill=tk.X)
 
-        top = ttk.Frame(self.root, padding=(8, 7))
+        top = ttk.Frame(self.root, padding=(6, 5))
         top.pack(side=tk.TOP, fill=tk.X)
-        self.btn_prev = ttk.Button(top, text="← Предыдущая", width=16, command=self.prev_seed)
-        self.btn_prev.pack(side=tk.LEFT)
+
+        # 1. Единый блок переключения модулей
+        mod_frame = ttk.Frame(top)
+        mod_frame.pack(side=tk.LEFT)
+        ttk.Button(mod_frame, text="✂ Сегментация", command=lambda: self._nav("segmentation")).pack(side=tk.LEFT, padx=1)
+        ttk.Button(mod_frame, text="🔍 Инспектор", state="disabled").pack(side=tk.LEFT, padx=1)
+        ttk.Button(mod_frame, text="🔥 Аугментации", command=lambda: self._nav("aug_inspection")).pack(side=tk.LEFT, padx=1)
+
+        ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill="y", padx=8)
+
+        # 2. Выбор папки
+        ttk.Button(top, text="📁 Папка...", command=self._choose_folder).pack(side=tk.LEFT, padx=2)
+
+        ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill="y", padx=6)
+
+        # 3. Навигация по семенам (единый стиль)
+        self.btn_prev = ttk.Button(top, text="◀ Назад", width=10, command=self.prev_seed)
+        self.btn_prev.pack(side=tk.LEFT, padx=2)
         nav = ttk.Frame(top)
-        nav.pack(side=tk.LEFT, padx=10)
+        nav.pack(side=tk.LEFT, padx=4)
         ttk.Label(nav, text="Семечка:").pack(side=tk.LEFT)
         self.pos_var = tk.StringVar(value="0")
         self.pos_entry = ttk.Entry(nav, textvariable=self.pos_var, width=6, justify="center")
@@ -136,19 +164,25 @@ class InspectionApp:
         self.pos_entry.bind("<Return>", self._on_goto)
         self.total_lbl = ttk.Label(nav, text="из 0")
         self.total_lbl.pack(side=tk.LEFT)
-        self.btn_next = ttk.Button(top, text="Следующая →", width=16, command=self.next_seed)
-        self.btn_next.pack(side=tk.LEFT)
+        self.btn_next = ttk.Button(top, text="Вперёд ▶", width=10, command=self.next_seed)
+        self.btn_next.pack(side=tk.LEFT, padx=2)
 
         ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill="y", padx=6)
-        for text, cmd in [("+", lambda: self.zoom_widget.zoom_in()), ("-", lambda: self.zoom_widget.zoom_out()),
-                          ("1:1", lambda: self.zoom_widget.zoom_actual()), ("По окну", lambda: self.zoom_widget.zoom_fit())]:
-            ttk.Button(top, text=text, width=4, command=cmd).pack(side=tk.LEFT, padx=1)
-        self.zoom_lbl = ttk.Label(top, text="100%", width=6, anchor="center")
-        self.zoom_lbl.pack(side=tk.LEFT)
 
-        ttk.Button(top, text="Сохранить контур", command=lambda: self._save_contour(show_message=True)).pack(side=tk.RIGHT, padx=(6, 0))
-        ttk.Button(top, text="Сохранить как...", command=self.save_as).pack(side=tk.RIGHT, padx=(6, 0))
-        ttk.Button(top, text="Сохранить", command=self.save).pack(side=tk.RIGHT)
+        # 4. Единый блок масштабирования
+        zoom_frame = ttk.Frame(top)
+        zoom_frame.pack(side=tk.LEFT)
+        ttk.Button(zoom_frame, text="+", width=3, command=lambda: self.zoom_widget.zoom_in()).pack(side=tk.LEFT, padx=1)
+        ttk.Button(zoom_frame, text="-", width=3, command=lambda: self.zoom_widget.zoom_out()).pack(side=tk.LEFT, padx=1)
+        ttk.Button(zoom_frame, text="1:1", width=4, command=lambda: self.zoom_widget.zoom_actual()).pack(side=tk.LEFT, padx=1)
+        ttk.Button(zoom_frame, text="По окну", command=lambda: self.zoom_widget.zoom_fit()).pack(side=tk.LEFT, padx=1)
+        self.zoom_lbl = ttk.Label(zoom_frame, text="100%", width=6, anchor="center")
+        self.zoom_lbl.pack(side=tk.LEFT, padx=3)
+
+        # 5. Кнопки сохранения справа
+        ttk.Button(top, text="Сохранить контур", command=lambda: self._save_contour(show_message=True)).pack(side=tk.RIGHT, padx=(4, 0))
+        ttk.Button(top, text="Сохранить как...", command=self.save_as).pack(side=tk.RIGHT, padx=(4, 0))
+        ttk.Button(top, text="Сохранить", command=self.save).pack(side=tk.RIGHT, padx=(4, 0))
 
         main = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         main.pack(fill='both', expand=True, padx=8, pady=(0, 8))
@@ -157,6 +191,7 @@ class InspectionApp:
         main.add(img_frame, weight=3)
         self.zoom_widget = ZoomableCanvas(img_frame)
         self.zoom_widget.set_render_callback(self._draw_contour_overlay)
+        self.zoom_widget.set_zoom_callback(lambda pct: self.zoom_lbl.config(text=f"{pct}%"))
         # Replace (not add to) the pan bindings that ZoomableCanvas sets up in
         # its constructor:  while a contour point is grabbed our handlers
         # return "break", so LMB drags move *only the point*, never the image;
@@ -186,34 +221,77 @@ class InspectionApp:
         main.add(params_frame, weight=1)
         self._build_form(params_frame)
 
+    def _nav(self, target: str) -> None:
+        if self.dirty:
+            self._save_current(strict=False)
+        if self.unsaved:
+            ans = messagebox.askyesnocancel(
+                "Несохраненные изменения",
+                "В таблице есть несохраненные изменения.\nСохранить перед переключением?",
+            )
+            if ans is None:
+                return
+            if ans and not self.save():
+                return
+        if self.contour_dirty:
+            ans = messagebox.askyesnocancel(
+                "Несохраненный контур",
+                "Контур был изменен, но не сохранен кнопкой.\nСохранить контур перед переключением?",
+            )
+            if ans is None:
+                return
+            if ans and not self._save_contour(show_message=False):
+                return
+        if self._switch:
+            self._switch(target, self.data_dir, self.current)
+
+    def _choose_folder(self) -> None:
+        d = filedialog.askdirectory(initialdir=self.data_dir, title="Выберите папку с семенами (out)")
+        if d:
+            self.data_dir = os.path.abspath(d)
+            self._load_data()
+            self.current = 0
+            self._update_all()
+
     def _build_form(self, parent: ttk.Frame) -> None:
         form = ttk.Frame(parent)
         form.pack(fill=tk.BOTH, expand=True)
 
-        def add_row(row: int, text: str) -> tk.StringVar:
-            ttk.Label(form, text=text).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=3)
+        def add_readonly(text: str, r: int) -> tk.StringVar:
+            ttk.Label(form, text=text).grid(row=r, column=0, sticky="w", padx=(0, 10), pady=3)
             var = tk.StringVar()
+            entry = ttk.Entry(form, textvariable=var, state="readonly", width=20)
+            entry.grid(row=r, column=1, sticky="ew", pady=3)
+            return var
+
+        def add_entry(text: str, r: int) -> tk.StringVar:
+            ttk.Label(form, text=text).grid(row=r, column=0, sticky="w", padx=(0, 10), pady=3)
+            var = tk.StringVar()
+            entry = ttk.Entry(form, textvariable=var, width=20)
+            entry.grid(row=r, column=1, sticky="ew", pady=3)
+            entry.bind("<KeyRelease>", self._mark_dirty_and_render)
+            entry.bind("<FocusOut>", self._mark_dirty_and_render)
             return var
 
         row = 0
-        self.file_index_var = add_row(row, "Файл (file_index):"); row += 1
-        self.index_var = add_row(row, "Индекс семечки:"); row += 1
+        self.file_index_var = add_readonly("Файл (file_index):", row); row += 1
+        self.index_var = add_readonly("Индекс семечки:", row); row += 1
 
-        self.status_var = tk.StringVar()
         ttk.Label(form, text="Статус:").grid(row=row, column=0, sticky="w", padx=(0, 10), pady=3)
+        self.status_var = tk.StringVar()
         self.status_box = ttk.Combobox(form, textvariable=self.status_var, values=self.status_options, width=17)
         self.status_box.grid(row=row, column=1, sticky="ew", pady=3)
         self.status_box.bind("<<ComboboxSelected>>", self._mark_dirty)
         self.status_box.bind("<KeyRelease>", self._mark_dirty)
         row += 1
 
-        self.length_var = add_row(row, "Длина, мм:"); row += 1
-        self.width_var = add_row(row, "Ширина, мм:"); row += 1
-        self.thickness_var = add_row(row, "Толщина, мм:"); row += 1
-        self.mass_var = add_row(row, "Масса, г:"); row += 1
+        self.length_var = add_entry("Длина, мм:", row); row += 1
+        self.width_var = add_entry("Ширина, мм:", row); row += 1
+        self.thickness_var = add_entry("Толщина, мм:", row); row += 1
+        self.mass_var = add_entry("Масса, г:", row); row += 1
 
-        self.shape_var = tk.StringVar()
         ttk.Label(form, text="Форма:").grid(row=row, column=0, sticky="w", padx=(0, 10), pady=3)
+        self.shape_var = tk.StringVar()
         self.shape_box = ttk.Combobox(form, textvariable=self.shape_var, values=self.shape_options, width=17)
         self.shape_box.grid(row=row, column=1, sticky="ew", pady=3)
         self.shape_box.bind("<<ComboboxSelected>>", self._mark_dirty)
@@ -221,12 +299,13 @@ class InspectionApp:
         row += 1
 
         ttk.Separator(form, orient="horizontal").grid(row=row, column=0, columnspan=2, sticky="ew", pady=8); row += 1
-        self.length_px_var = add_row(row, "Длина, px:"); row += 1
-        self.width_px_var = add_row(row, "Ширина, px:"); row += 1
-        self.angle_var = add_row(row, "Угол, °:"); row += 1
-        self.area_var = add_row(row, "Площадь, px:"); row += 1
-        self.edge_width_var = add_row(row, "Ширина края, px:"); row += 1
-        self.mm_per_px_var = add_row(row, "мм/пиксель:"); row += 1
+
+        self.length_px_var = add_readonly("Длина, px:", row); row += 1
+        self.width_px_var = add_readonly("Ширина, px:", row); row += 1
+        self.angle_var = add_readonly("Угол, °:", row); row += 1
+        self.area_var = add_readonly("Площадь, px:", row); row += 1
+        self.edge_width_var = add_readonly("Ширина края, px:", row); row += 1
+        self.mm_per_px_var = add_readonly("мм/пиксель:", row); row += 1
 
         self._readonly_vars = {
             "file_index": self.file_index_var, "index": self.index_var,
@@ -234,23 +313,11 @@ class InspectionApp:
             "angle_deg": self.angle_var, "area_px": self.area_var,
             "edge_width_px": self.edge_width_var, "mm_per_px": self.mm_per_px_var,
         }
-        for var in self._readonly_vars.values():
-            pass
 
         self._entry_vars = {
             "length_mm": self.length_var, "width_mm": self.width_var,
             "thickness_mm": self.thickness_var, "mass_g": self.mass_var,
         }
-        for r_i, (key, var) in enumerate(self._entry_vars.items()):
-            entry = ttk.Entry(form, textvariable=var, width=20)
-            entry.grid(row=list(self._entry_vars.keys()).index(key) + 3, column=1, sticky="ew", pady=3)
-            entry.bind("<KeyRelease>", self._mark_dirty_and_render)
-            entry.bind("<FocusOut>", self._mark_dirty_and_render)
-
-        for r_i, (key, var) in enumerate(self._readonly_vars.items()):
-            entry = ttk.Entry(form, textvariable=var, state="readonly", width=20)
-            base_row = list(self._readonly_vars.keys()).index(key)
-            entry.grid(row=base_row if base_row < 2 else base_row + 6, column=1, sticky="ew", pady=3)
 
         form.columnconfigure(1, weight=1)
 
@@ -289,8 +356,6 @@ class InspectionApp:
     def _move(self, delta: int) -> None:
         if not self.records:
             return
-        if self.contour_dirty:
-            self._save_contour(show_message=False)
         if self.dirty and not self._save_current(strict=True):
             return
         new_index = self.current + delta
@@ -301,8 +366,6 @@ class InspectionApp:
     def _on_goto(self, event: tk.Event | None = None) -> None:
         if not self.records:
             return
-        if self.contour_dirty:
-            self._save_contour(show_message=False)
         if self.dirty and not self._save_current(strict=True):
             return
         try:
@@ -346,6 +409,16 @@ class InspectionApp:
             var.set(record.get(key, ""))
         for key, var in self._entry_vars.items():
             var.set(record.get(key, ""))
+        if not self.length_var.get() and record.get("length_px") and record.get("mm_per_px"):
+            l_px = parse_float(record.get("length_px"))
+            m_px = parse_float(record.get("mm_per_px"))
+            if l_px is not None and m_px is not None and m_px > 0:
+                self.length_var.set(f"{l_px * m_px:.4f}")
+        if not self.width_var.get() and record.get("width_px") and record.get("mm_per_px"):
+            w_px = parse_float(record.get("width_px"))
+            m_px = parse_float(record.get("mm_per_px"))
+            if w_px is not None and m_px is not None and m_px > 0:
+                self.width_var.set(f"{w_px * m_px:.4f}")
         self.status_var.set(record.get("status", ""))
         self.shape_var.set(record.get("shape", ""))
 
@@ -362,20 +435,9 @@ class InspectionApp:
             return
         record = self.records[self.current]
         image_path = self._find_image_path(record)
-        # Kick off the decode *before* touching the canvas so the UI thread
-        # never waits on JPEG; when it lands we call set_image which renders
-        # (and our render-callback re-draws contour + ruler overlays).
-        self._image_gen += 1
-        gen = self._image_gen
-        if image_path and os.path.isfile(image_path):
-            def on_img(img: Image.Image | None, gen=gen, path=image_path) -> None:
-                if gen != self._image_gen or not self.root.winfo_exists():
-                    return
-                self.zoom_widget.set_image(img if img is not None else self._make_placeholder(record))
-            load_image_async(image_path, on_img, self.zoom_widget.canvas)
-        else:
-            self.zoom_widget.set_image(self._make_placeholder(record))
 
+        # 1. Load contour data FIRST so self.contour_points is ready
+        # before any render callback fires (synchronous cache-hit or async).
         file_index = str(record.get("file_index", "")).strip()
         if not file_index and image_path:
             file_index = os.path.splitext(os.path.basename(image_path))[0]
@@ -398,6 +460,22 @@ class InspectionApp:
             actual = self.json_files.get(f"{img_base}_contour".lower())
             if actual:
                 loaded = self._load_contour_file(os.path.join(self.data_dir, actual))
+
+        # 2. Decode/set the image.
+        self._image_gen += 1
+        gen = self._image_gen
+        if image_path and os.path.isfile(image_path):
+            def on_img(img: Image.Image | None, gen=gen, path=image_path) -> None:
+                if gen != self._image_gen or not self.root.winfo_exists():
+                    return
+                self.zoom_widget.set_image(img if img is not None else self._make_placeholder(record))
+                self._draw_contour_overlay()
+            load_image_async(image_path, on_img, self.zoom_widget.canvas)
+        else:
+            self.zoom_widget.set_image(self._make_placeholder(record))
+
+        # 3. Explicitly trigger overlay draw (for synchronous cached loads or immediate display)
+        self._draw_contour_overlay()
 
     def _load_contour_file(self, path: str) -> bool:
         """Read contour points from *path*; return True on success."""
@@ -482,12 +560,7 @@ class InspectionApp:
                 # Geometry changed: rebuild the display bitmap at the new fit.
                 self._last_render_size = (cw, ch)
                 self.zoom_widget.render()
-            record = self.records[self.current] if self.records else {}
-            mm_per_px = parse_float(record.get("mm_per_px"))
-            length_mm = parse_float(self.length_var.get()) or parse_float(record.get("length_mm"))
-            width_mm = parse_float(self.width_var.get()) or parse_float(record.get("width_mm"))
-            draw_mm_ruler(self.zoom_widget.image, mm_per_px, self.zoom_widget.display_scale, length_mm, width_mm)
-            self.zoom_widget.redraw_display()
+            self._draw_contour_overlay()
         self.zoom_lbl.config(text=f"{self.zoom_widget.get_zoom_percent()}%")
 
     def _draw_contour_overlay(self) -> None:
@@ -498,7 +571,7 @@ class InspectionApp:
         canvas.delete("contour")
         self.contour_line_items = []
         self.contour_point_items = []
-        if not self.contour_points or self.zoom_widget.display_scale <= 0:
+        if self.zoom_widget.display_scale <= 0:
             return
         scale = self.zoom_widget.display_scale
         if len(self.contour_points) >= 2:
@@ -519,6 +592,21 @@ class InspectionApp:
             item = canvas.create_oval(sx - r, sy - r, sx + r, sy + r, outline="#000000", fill="#ffff00", width=1,
                                       tags=("contour", "contour_pt", f"pt:{i}"))
             self.contour_point_items.append(item)
+
+        # Draw vector ruler
+        record = self.records[self.current] if self.records and 0 <= self.current < len(self.records) else {}
+        mm_per_px = parse_float(record.get("mm_per_px"))
+        length_mm = parse_float(self.length_var.get()) or parse_float(record.get("length_mm"))
+        width_mm = parse_float(self.width_var.get()) or parse_float(record.get("width_mm"))
+        if not length_mm and mm_per_px and record.get("length_px"):
+            length_mm = (parse_float(record.get("length_px")) or 0.0) * mm_per_px
+        if not width_mm and mm_per_px and record.get("width_px"):
+            width_mm = (parse_float(record.get("width_px")) or 0.0) * mm_per_px
+        if mm_per_px and mm_per_px > 0 and self.zoom_widget.image:
+            draw_canvas_ruler(
+                canvas, mm_per_px, scale, length_mm, width_mm,
+                canvas_h=self.zoom_widget.image.size[1], tag="contour"
+            )
 
     def _event_to_image(self, event: tk.Event) -> tuple[float, float] | None:
         if self.zoom_widget.image is None or self.zoom_widget.display_scale <= 0:
@@ -595,8 +683,6 @@ class InspectionApp:
     def _on_left_release(self, event: tk.Event) -> None:
         if self.drag_point_index is not None:
             self.drag_point_index = None
-            if self.contour_dirty:
-                self._save_contour(show_message=False)
             return "break"
 
     @staticmethod
@@ -660,7 +746,6 @@ class InspectionApp:
         self.contour_points.insert(self._insertion_index(pt), pt)
         self.contour_dirty = True
         self._draw_contour_overlay()
-        self._save_contour(show_message=False)
         return "break"
 
     def _on_right_click(self, event: tk.Event) -> None:
@@ -672,7 +757,6 @@ class InspectionApp:
             del self.contour_points[idx]
             self.contour_dirty = True
             self._draw_contour_overlay()
-            self._save_contour(show_message=False)
         return "break"
 
     def _save_contour(self, show_message: bool = False) -> bool:
@@ -771,20 +855,24 @@ class InspectionApp:
     def save(self) -> bool:
         if self.dirty and not self._save_current(strict=True):
             return False
+        if self.contour_dirty:
+            self._save_contour(show_message=False)
         if not self.records:
             messagebox.showwarning("Сохранение", "Нет записей для сохранения.")
             return False
         if not self.output_path:
-            return self.save_as()
+            self.output_path = os.path.join(self.data_dir, "seeds.csv")
         return self._write_csv(self.output_path)
 
     def save_as(self) -> bool:
         if self.dirty and not self._save_current(strict=True):
             return False
+        if self.contour_dirty:
+            self._save_contour(show_message=False)
         if not self.records:
             messagebox.showwarning("Сохранение", "Нет записей для сохранения.")
             return False
-        initial = os.path.basename(self.output_path) if self.output_path else "seeds_edited.csv"
+        initial = os.path.basename(self.output_path) if self.output_path else "seeds.csv"
         path = filedialog.asksaveasfilename(
             title="Сохранить новый CSV", defaultextension=".csv",
             initialdir=self.data_dir, initialfile=initial,
@@ -798,7 +886,7 @@ class InspectionApp:
     def _get_fieldnames(self) -> list[str]:
         names: list[str] = []
         for name in ALL_COLUMNS:
-            if name not in names:
+            if name not in SKIP_CSV_FIELDS and name not in names:
                 names.append(name)
         for name in self.fieldnames:
             if name not in SKIP_CSV_FIELDS and name not in names:
@@ -807,13 +895,14 @@ class InspectionApp:
             for key in record:
                 if key not in SKIP_CSV_FIELDS and key not in names:
                     names.append(key)
-        return names
+        return [n for n in names if n not in SKIP_CSV_FIELDS and n not in ("length_mm", "width_mm")]
 
     def _write_csv(self, path: str) -> bool:
         try:
             fieldnames = self._get_fieldnames()
             rows = [{key: record.get(key, "") for key in fieldnames} for record in self.records]
             write_csv(path, fieldnames, rows)
+            self.output_path = path
             self.unsaved = False
             self.dirty = False
             self._update_statusbar()
@@ -836,12 +925,21 @@ class InspectionApp:
         self.statusbar.config(text=text)
 
     def _on_close(self) -> None:
-        if self.contour_dirty:
-            self._save_contour(show_message=False)
+        if self.dirty:
+            self._save_current(strict=False)
         if self.unsaved:
-            answer = messagebox.askyesnocancel("Выход", "Сохранить изменения перед выходом?")
+            answer = messagebox.askyesnocancel("Выход", "Сохранить изменения в таблице перед выходом?")
             if answer is None:
                 return
             if answer and not self.save():
+                return
+        if self.contour_dirty:
+            answer = messagebox.askyesnocancel(
+                "Несохраненный контур",
+                "Контур был изменен, но не сохранен кнопкой.\nСохранить контур перед выходом?",
+            )
+            if answer is None:
+                return
+            if answer and not self._save_contour(show_message=False):
                 return
         self.root.destroy()

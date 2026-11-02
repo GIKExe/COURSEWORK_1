@@ -93,9 +93,25 @@ class SegmentationApp:
     def _build_ui(self) -> None:
         self.root.title("Выделение и нарезка семян ячменя")
         self.root.geometry("1450x850")
+        self.root.minsize(1050, 650)
 
-        toolbar = ttk.Frame(self.root, padding=5)
-        toolbar.pack(fill=tk.X)
+        # ── Верхний тулбар ──
+        toolbar = ttk.Frame(self.root, padding=(6, 5))
+        toolbar.pack(side=tk.TOP, fill=tk.X)
+
+        # 1. Единый блок переключения модулей
+        mod_frame = ttk.Frame(toolbar)
+        mod_frame.pack(side=tk.LEFT)
+        btn_seg = ttk.Button(mod_frame, text="✂ Сегментация", state="disabled")
+        btn_seg.pack(side=tk.LEFT, padx=1)
+        btn_ins = ttk.Button(mod_frame, text="🔍 Инспектор", command=lambda: self._nav("inspection"))
+        btn_ins.pack(side=tk.LEFT, padx=1)
+        btn_aug = ttk.Button(mod_frame, text="🔥 Аугментации", command=lambda: self._nav("aug_inspection"))
+        btn_aug.pack(side=tk.LEFT, padx=1)
+
+        ttk.Separator(toolbar, orient="vertical").pack(side=tk.LEFT, fill="y", padx=8)
+
+        # 2. Кнопки операций
         buttons = [
             ("Открыть фото", self.open_image),
             ("Обработать", self.process),
@@ -111,12 +127,24 @@ class SegmentationApp:
             if text == "Калибровать линейку":
                 ToolTip(btn, TOOLTIPS.get("calibrate_ruler", ""))
 
-        ttk.Separator(toolbar, orient="vertical").pack(side=tk.LEFT, fill="y", padx=6)
-        for text, cmd in [("Инспекция", lambda: self._nav("inspection")), ("Инспекция аугм.", lambda: self._nav("aug_inspection"))]:
-            ttk.Button(toolbar, text=text, command=cmd).pack(side=tk.LEFT, padx=2)
+        ttk.Separator(toolbar, orient="vertical").pack(side=tk.LEFT, fill="y", padx=8)
 
-        ttk.Label(self.root, textvariable=self.status_var, anchor="w", padding=(5, 2)).pack(fill=tk.X, side=tk.BOTTOM)
+        # 3. Единый блок масштабирования
+        zoom_frame = ttk.Frame(toolbar)
+        zoom_frame.pack(side=tk.LEFT)
+        ttk.Button(zoom_frame, text="+", width=3, command=lambda: self.zoom_widget.zoom_in()).pack(side=tk.LEFT, padx=1)
+        ttk.Button(zoom_frame, text="-", width=3, command=lambda: self.zoom_widget.zoom_out()).pack(side=tk.LEFT, padx=1)
+        ttk.Button(zoom_frame, text="1:1", width=4, command=lambda: self.zoom_widget.zoom_actual()).pack(side=tk.LEFT, padx=1)
+        ttk.Button(zoom_frame, text="По окну", command=lambda: self.zoom_widget.zoom_fit()).pack(side=tk.LEFT, padx=1)
+        self.zoom_label = ttk.Label(zoom_frame, text="100%", width=6, anchor="center")
+        self.zoom_label.pack(side=tk.LEFT, padx=3)
 
+        # ── Строка состояния снизу ──
+        ttk.Label(
+            self.root, textvariable=self.status_var, anchor="w", padding=(8, 4), relief="sunken"
+        ).pack(fill=tk.X, side=tk.BOTTOM)
+
+        # ── Основная область: слева параметры, справа холст ──
         main = ttk.Frame(self.root, padding=5)
         main.pack(fill=tk.BOTH, expand=True)
 
@@ -131,20 +159,21 @@ class SegmentationApp:
         left_canvas.configure(yscrollcommand=left_scroll.set)
         left_canvas.pack(side=tk.LEFT, fill=tk.Y)
         left_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Скролл колесиком мыши по панели параметров
+        def _on_param_wheel(event: tk.Event) -> None:
+            delta = -1 if (event.delta > 0 or getattr(event, "num", 0) == 4) else 1
+            left_canvas.yview_scroll(delta, "units")
+
+        left_canvas.bind("<MouseWheel>", _on_param_wheel)
+        self.param_frame.bind("<MouseWheel>", _on_param_wheel)
+
         self._build_param_panel()
 
         right = ttk.Frame(main)
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.zoom_widget = ZoomableCanvas(right)
-        self.zoom_widget.set_render_callback(self._on_render)
-
-        self.zoom_toolbar = ttk.Frame(main)
-        self.zoom_toolbar.pack(side=tk.BOTTOM, fill=tk.X)
-        for text, cmd in [("+", self.zoom_widget.zoom_in), ("-", self.zoom_widget.zoom_out),
-                          ("1:1", self.zoom_widget.zoom_actual), ("По окну", self.zoom_widget.zoom_fit)]:
-            ttk.Button(self.zoom_toolbar, text=text, width=6, command=cmd).pack(side=tk.LEFT, padx=1)
-        self.zoom_label = ttk.Label(self.zoom_toolbar, text="100%", width=6, anchor="center")
-        self.zoom_label.pack(side=tk.LEFT, padx=4)
+        self.zoom_widget.set_zoom_callback(lambda pct: self.zoom_label.config(text=f"{pct}%"))
 
     def _build_param_panel(self) -> None:
         pf = self.param_frame
@@ -189,9 +218,6 @@ class SegmentationApp:
         params = normalize_params(params)
         params["mm_per_px"] = parse_mm_per_px_text(self.mm_per_px_var.get())
         return params
-
-    def _on_render(self) -> None:
-        self.zoom_label.config(text=f"{self.zoom_widget.get_zoom_percent()}%")
 
     def _set_view(self, view: str) -> None:
         if view == "result" and self.result_bgr is None:
@@ -317,4 +343,4 @@ class SegmentationApp:
 
     def _nav(self, target: str) -> None:
         if self._switch:
-            self._switch(target)
+            self._switch(target, self.out_dir, 0)

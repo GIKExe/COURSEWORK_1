@@ -36,12 +36,14 @@ IMAGE_EXTENSIONS: tuple[str, ...] = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".
 DEFAULT_CSV_FIELDS: list[str] = [
     "file_index", "index", "status", "edge_width_px",
     "length_px", "width_px", "angle_deg", "area_px",
-    "length_mm", "width_mm", "mm_per_px",
+    "mm_per_px",
 ]
 
 EXTRA_EDITABLE_FIELDS: list[str] = ["thickness_mm", "mass_g", "shape"]
 
-SKIP_CSV_FIELDS: frozenset[str] = frozenset({"filename", "path", "source_path"})
+SKIP_CSV_FIELDS: frozenset[str] = frozenset({
+    "filename", "path", "source_path", "length_mm", "width_mm",
+})
 
 AUG_EXTRA_FIELDS: list[str] = ["source", "split", "is_aug", "aug_of"]
 

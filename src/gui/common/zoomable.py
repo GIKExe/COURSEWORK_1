@@ -66,23 +66,12 @@ def load_image_async(
     canvas: tk.Misc,
     generation: int = 0,
 ) -> None:
-    """Decode *path* off the UI thread and hand the result to *callback*.
-
-    The callback is invoked via ``after_idle`` on the Tk main thread (using
-    *canvas* as the event-queue anchor), so it may touch widgets safely.  If
-    the image is already in the cache the callback fires synchronously
-    (instant navigation through the history).  A stale background decode (the
-    user switched again meanwhile) is dropped by comparing *generation*
-    numbers in the caller.
-    """
+    """Decode *path* off the UI thread and hand the result to *callback*."""
     cached = _SOURCE_CACHE.get(path)
     if cached is not None:
         callback(cached.copy())
         return
 
-    # Deliver results through the canvas event queue (thread-safe `after`);
-    # tkinter itself forbids calling widget methods from other threads, but
-    # scheduling an idle callback is explicitly allowed.
     app_root = canvas.winfo_toplevel()
 
     def _worker() -> None:
@@ -103,7 +92,7 @@ def load_image_async(
         try:
             app_root.after_idle(_deliver, payload)
         except tk.TclError:
-            pass  # window closed while decoding
+            pass
 
     def _deliver(payload: object) -> None:
         if isinstance(payload, Image.Image):
@@ -112,17 +101,11 @@ def load_image_async(
             callback(None)
 
     threading.Thread(target=_worker, name="image-decode", daemon=True).start()
-    del generation  # generation bookkeeping lives in the caller
+    del generation
 
 
 class ZoomableCanvas:
-    """Encapsulates zoom/pan logic on a tk.Canvas with scrollbars.
-
-    Usage:
-        zc = ZoomableCanvas(parent_frame)
-        zc.pack(fill="both", expand=True)
-        zc.set_image(pil_image)
-    """
+    """Encapsulates zoom/pan logic on a tk.Canvas with scrollbars."""
 
     def __init__(self, parent: ttk.Frame | tk.Frame, bg: str = "#202020") -> None:
         self._frame = parent
@@ -145,16 +128,14 @@ class ZoomableCanvas:
         self.zoom_mode: str = "fit"
         self.zoom_factor: float = 1.0
         self._last_size: tuple[int, int] = (0, 0)
-        # Coalescing handle for deferred renders triggered by Configure /
-        # zoom events: while the user drags a scrollbar or resizes the
-        # window we must NOT resize+convert the photo on every single event.
         self._render_after_id: str | None = None
         self._on_render: Callable[[], None] | None = None
+        self._on_zoom: Callable[[int], None] | None = None
 
         self.canvas.bind("<Configure>", self._on_configure)
         self.canvas.bind("<Control-MouseWheel>", self._on_ctrl_wheel)
-        self.canvas.bind("<Control-Button-4>", lambda e: self._zoom_by(1.25))
-        self.canvas.bind("<Control-Button-5>", lambda e: self._zoom_by(0.8))
+        self.canvas.bind("<Control-Button-4>", lambda e: self._zoom_by(1.25, e.x, e.y))
+        self.canvas.bind("<Control-Button-5>", lambda e: self._zoom_by(0.8, e.x, e.y))
         self.canvas.bind("<MouseWheel>", self._on_scroll)
         self.canvas.bind("<Button-4>", self._on_scroll)
         self.canvas.bind("<Button-5>", self._on_scroll)
@@ -169,11 +150,15 @@ class ZoomableCanvas:
         """Register a callback invoked after each render (for overlays)."""
         self._on_render = cb
 
+    def set_zoom_callback(self, cb: Callable[[int], None]) -> None:
+        """Register a callback invoked whenever zoom percentage changes."""
+        self._on_zoom = cb
+        if self._source_image is not None:
+            cb(self.get_zoom_percent())
+
     def set_image(self, img: Image.Image | None) -> None:
         self._source_image = img
         if img is None:
-            # keep the previous display scale so that a later redraw_display()
-            # does not work with stale geometry when nothing can be rendered
             self._image = None
         self.zoom_mode = "fit"
         self.render()
@@ -181,9 +166,6 @@ class ZoomableCanvas:
     def render(self) -> None:
         src = self._source_image
         if src is None:
-            # Nothing to show yet (e.g. window not mapped and no fallback).
-            # Do NOT drop a previously rendered display copy: callers draw
-            # overlays into self.image right after render() returns.
             return
         if src.mode != "RGB":
             src = src.convert("RGB")
@@ -194,13 +176,8 @@ class ZoomableCanvas:
         scale = self._compute_scale(w, h)
         self.display_scale = scale
         dw, dh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
-        # Resize a pristine copy every time: the source must never be mutated,
-        # otherwise overlays drawn into it would accumulate / disappear between
-        # renders (the aug-inspector contour bug).
+
         if (dw, dh) != (w, h):
-            # reduce_l is a lossy integer box-downscale that is several times
-            # faster than a direct big resize; finish with BILINEAR to the
-            # exact target size.  Only used when we shrink by >= 2x.
             if dw * 2 <= w and dh * 2 <= h:
                 try:
                     resized = src.reduce(2)
@@ -216,11 +193,16 @@ class ZoomableCanvas:
                 resized = src.resize((dw, dh), RESAMPLE)
         else:
             resized = src.copy()
+
         self._image = resized
-        self.canvas.delete("all")
+        self.canvas.delete("base")
         self._tk_image = ImageTk.PhotoImage(resized)
         self.canvas.create_image(0, 0, anchor="nw", image=self._tk_image, tags="base")
+        self.canvas.tag_lower("base")
         self.canvas.configure(scrollregion=(0, 0, dw, dh))
+
+        if self._on_zoom:
+            self._on_zoom(self.get_zoom_percent())
         if self._on_render:
             self._on_render()
 
@@ -238,18 +220,13 @@ class ZoomableCanvas:
         self.render()
 
     def redraw_display(self) -> None:
-        """Re-convert the current display copy (*self._image*) to a PhotoImage.
-
-        Used after somebody drew on ``self.image`` (e.g. the mm ruler): the
-        canvas bitmap is refreshed from the mutated display copy and the
-        render callback re-draws vector overlays on top of it.  The source
-        image stays untouched, so a later ``render()`` starts from clean data.
-        """
+        """Re-convert current display copy (*self._image*) to PhotoImage."""
         if self._image is None:
             return
-        self.canvas.delete("all")
+        self.canvas.delete("base")
         self._tk_image = ImageTk.PhotoImage(self._image)
         self.canvas.create_image(0, 0, anchor="nw", image=self._tk_image, tags="base")
+        self.canvas.tag_lower("base")
         w, h = self._image.size
         self.canvas.configure(scrollregion=(0, 0, max(1, w), max(1, h)))
         if self._on_render:
@@ -264,15 +241,17 @@ class ZoomableCanvas:
     def zoom_actual(self) -> None:
         if self._source_image is None:
             return
-        self.zoom_mode = "manual"
-        self.zoom_factor = 1.0
-        self.render()
+        cw = max(1, self.canvas.winfo_width())
+        ch = max(1, self.canvas.winfo_height())
+        self._zoom_by(1.0 / self.display_scale if self.display_scale > 0 else 1.0, cw / 2.0, ch / 2.0)
 
     def zoom_fit(self) -> None:
         if self._source_image is None:
             return
         self.zoom_mode = "fit"
         self.render()
+        self.canvas.xview_moveto(0.0)
+        self.canvas.yview_moveto(0.0)
 
     def get_zoom_percent(self) -> int:
         return int(round(self.display_scale * 100))
@@ -282,15 +261,48 @@ class ZoomableCanvas:
         self._image = None
         self._source_image = None
         self._tk_image = None
+        if self._on_zoom:
+            self._on_zoom(100)
 
-    def _zoom_by(self, factor: float) -> None:
+    def _zoom_by(self, factor: float, anchor_x: float | None = None, anchor_y: float | None = None) -> None:
         if self._source_image is None:
             return
-        current = self.display_scale if self.display_scale > 0 else 1.0
+        old_scale = self.display_scale if self.display_scale > 0 else 1.0
+        new_scale = self._clamp(old_scale * factor)
+        if abs(new_scale - old_scale) < 1e-5:
+            return
+
+        cw = max(1, self.canvas.winfo_width())
+        ch = max(1, self.canvas.winfo_height())
+        vx = anchor_x if anchor_x is not None else cw / 2.0
+        vy = anchor_y if anchor_y is not None else ch / 2.0
+
+        # Координаты на исходном изображении под курсором / центром
+        img_x = self.canvas.canvasx(vx) / old_scale
+        img_y = self.canvas.canvasy(vy) / old_scale
+
         self.zoom_mode = "manual"
-        self.zoom_factor = self._clamp(current * factor)
-        # Wheel bursts (trackpad) would otherwise re-resize the photo per tick.
-        self.request_render(delay=40)
+        self.zoom_factor = new_scale
+        self.render()
+
+        # Восстанавливаем точку под курсором
+        new_canvas_x = img_x * new_scale
+        new_canvas_y = img_y * new_scale
+        sr = self.canvas.cget("scrollregion")
+        if sr:
+            parts = [float(p) for p in sr.split()]
+            sr_w = max(1.0, parts[2] - parts[0])
+            sr_h = max(1.0, parts[3] - parts[1])
+            if sr_w > cw:
+                frac_x = max(0.0, min(1.0, (new_canvas_x - vx) / sr_w))
+                self.canvas.xview_moveto(frac_x)
+            else:
+                self.canvas.xview_moveto(0.0)
+            if sr_h > ch:
+                frac_y = max(0.0, min(1.0, (new_canvas_y - vy) / sr_h))
+                self.canvas.yview_moveto(frac_y)
+            else:
+                self.canvas.yview_moveto(0.0)
 
     def _clamp(self, scale: float) -> float:
         return max(MIN_ZOOM, min(MAX_ZOOM, float(scale)))
@@ -315,12 +327,11 @@ class ZoomableCanvas:
             return
         self._last_size = size
         if self._source_image is not None and self.zoom_mode == "fit":
-            # Defer: during live window resizing this fires dozens of times
-            # per second and each immediate render() froze the UI.
             self.request_render()
 
     def _on_ctrl_wheel(self, event: tk.Event) -> None:
-        self._zoom_by(1.25 if event.delta > 0 else 0.8)
+        factor = 1.25 if event.delta > 0 else 0.8
+        self._zoom_by(factor, anchor_x=event.x, anchor_y=event.y)
 
     def _on_scroll(self, event: tk.Event) -> None:
         if getattr(event, "state", 0) & 0x0004:

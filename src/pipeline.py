@@ -43,6 +43,8 @@ def load_dataset(src: str, csv_name: str) -> tuple[str, list[str], list[dict[str
     if not os.path.isfile(csv_path):
         csv_path = os.path.join(src, "seeds.csv")
     if not os.path.isfile(csv_path):
+        csv_path = os.path.join(src, "seeds_edited.csv")
+    if not os.path.isfile(csv_path):
         raise FileNotFoundError(f"CSV не найден в {src}")
     fields, rows = read_csv_robust(csv_path)
     if "file_index" not in fields:
@@ -51,13 +53,40 @@ def load_dataset(src: str, csv_name: str) -> tuple[str, list[str], list[dict[str
     return csv_path, fields, rows
 
 
-def split_sources(rows: list[dict[str, str]], val_fraction: float, rng: random.Random) -> set[str]:
-    sources = sorted({source_of(r["file_index"]) for r in rows})
-    rng.shuffle(sources)
-    n_val = max(1, int(round(len(sources) * val_fraction))) if val_fraction > 0 and len(sources) > 1 else 0
-    val_sources = set(sources[:n_val])
-    log.info("Split: %d фото, %d val", len(sources), len(val_sources))
-    return val_sources
+def assign_train_val_split(
+    rows: list[dict[str, str]],
+    val_fraction: float,
+    rng: random.Random,
+) -> None:
+    """Assign 'split': 'train' or 'val' across all photos (originals + augmentations)."""
+    if not rows or val_fraction <= 0.0:
+        for r in rows:
+            r["split"] = "train"
+        return
+
+    orig_indices = [i for i, r in enumerate(rows) if str(r.get("is_aug", "0")) in ("0", "")]
+    aug_indices = [i for i, r in enumerate(rows) if str(r.get("is_aug", "0")) not in ("0", "")]
+
+    val_indices: set[int] = set()
+    for idx_list in [orig_indices, aug_indices]:
+        if not idx_list:
+            continue
+        shuffled = list(idx_list)
+        rng.shuffle(shuffled)
+        n_val = int(round(len(shuffled) * val_fraction))
+        if len(shuffled) > 1 and val_fraction > 0:
+            n_val = max(1, min(n_val, len(shuffled) - 1))
+        val_indices.update(shuffled[:n_val])
+
+    for i, r in enumerate(rows):
+        r["split"] = "val" if i in val_indices else "train"
+
+    n_total = len(rows)
+    n_val = len(val_indices)
+    log.info(
+        "Разделение на train/val по всем фоткам: всего %d, train %d, val %d (%.1f%% val)",
+        n_total, n_total - n_val, n_val, (n_val / n_total) * 100 if n_total else 0,
+    )
 
 
 def augment_seed(
@@ -98,6 +127,8 @@ def augment_seed(
         with open(os.path.join(dst, new_fi + CONTOUR_SUFFIX), "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False)
         r = dict(row)
+        r.pop("length_mm", None)
+        r.pop("width_mm", None)
         r["file_index"] = new_fi
         if angle_old is not None:
             r["angle_deg"] = f"{transform_angle(angle_old, A):.3f}"
@@ -108,8 +139,8 @@ def augment_seed(
 
 def run_augmentation(
     src: str = "out",
-    csv_name: str = "seeds_edited.csv",
-    dst: str = "out_aug",
+    csv_name: str = "seeds.csv",
+    dst: str = "out",
     n_aug: int = 11,
     val_fraction: float = 0.2,
 ) -> None:
@@ -118,20 +149,27 @@ def run_augmentation(
     rng_np = np.random.default_rng(SEED)
     csv_path, fields, rows = load_dataset(src, csv_name)
     os.makedirs(dst, exist_ok=True)
-    val_sources = split_sources(rows, val_fraction, rng_std)
+    is_same_dir = os.path.abspath(src) == os.path.abspath(dst)
 
-    out_fields = list(fields)
+    out_fields = [f for f in fields if f not in ("length_mm", "width_mm")]
     for name in AUG_EXTRA_FIELDS:
         if name not in out_fields:
             out_fields.append(name)
     out_rows: list[dict[str, str]] = []
     n_orig = n_aug_total = n_skip = 0
 
+    # Only augment original seeds (not existing augmentations)
+    orig_rows = [
+        r for r in rows
+        if str(r.get("is_aug", "0")) not in ("1", "True", "true")
+        and not re.search(r"_aug\d+$", r.get("file_index", ""))
+    ]
+
     try:
         from tqdm import tqdm
-        iterator = tqdm(rows, desc="Аугментация", total=len(rows))
+        iterator = tqdm(orig_rows, desc="Аугментация", total=len(orig_rows))
     except ImportError:
-        iterator = rows
+        iterator = orig_rows
 
     for row in iterator:
         fi = row["file_index"]
@@ -143,28 +181,32 @@ def run_augmentation(
             n_skip += 1
             continue
         src_name = source_of(fi)
-        split = "val" if src_name in val_sources else "train"
-        shutil.copy2(img_path, os.path.join(dst, fi + IMG_EXT))
-        shutil.copy2(json_path, os.path.join(dst, fi + CONTOUR_SUFFIX))
+        if not is_same_dir:
+            shutil.copy2(img_path, os.path.join(dst, fi + IMG_EXT))
+            shutil.copy2(json_path, os.path.join(dst, fi + CONTOUR_SUFFIX))
         r0 = dict(row)
-        r0.update({"source": src_name, "split": split, "is_aug": 0, "aug_of": ""})
+        r0.pop("length_mm", None)
+        r0.pop("width_mm", None)
+        r0.update({"source": src_name, "split": "train", "is_aug": 0, "aug_of": ""})
         out_rows.append(r0)
         n_orig += 1
-        if split == "val":
-            continue
+
         new_rows = augment_seed(img, pts, meta, row, fi, src_name, dst, n_aug, rng_np, rng_std)
         out_rows.extend(new_rows)
         n_aug_total += len(new_rows)
 
+    # Perform train/val split across ALL photos (both original and augmented)
+    assign_train_val_split(out_rows, val_fraction, rng_std)
+
     write_csv(os.path.join(dst, "seeds.csv"), out_fields, out_rows)
     log.info("Оригиналов: %d, аугментаций: %d, пропущено: %d", n_orig, n_aug_total, n_skip)
-    log.info("Результат: %s", dst)
+    log.info("Результат сохранён в: %s", dst)
 
 
 def main() -> None:
     src = sys.argv[1] if len(sys.argv) > 1 else "out"
-    csv_name = sys.argv[2] if len(sys.argv) > 2 else "seeds_edited.csv"
-    dst = sys.argv[3] if len(sys.argv) > 3 else "out_aug"
+    csv_name = sys.argv[2] if len(sys.argv) > 2 else "seeds.csv"
+    dst = sys.argv[3] if len(sys.argv) > 3 else "out"
     run_augmentation(src, csv_name, dst)
 
 
