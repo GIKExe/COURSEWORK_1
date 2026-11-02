@@ -94,8 +94,6 @@ def build_seed_csv_row(
         "width_px": fmt_float(width_px, 3),
         "angle_deg": fmt_float(item.get("angle_deg", item.get("angle")), 3),
         "area_px": fmt_float(item.get("area"), 1),
-        "length_mm": _px_to_mm(length_px, mm_per_px, 4),
-        "width_mm": _px_to_mm(width_px, mm_per_px, 4),
         "mm_per_px": fmt_float(mm_per_px, 8) if mm_per_px is not None else "",
     }
 

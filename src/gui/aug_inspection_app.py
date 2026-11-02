@@ -12,7 +12,7 @@ from PIL import Image
 
 from core.csv_utils import read_csv_robust
 from gui.common.file_scan import scan_directory
-from gui.common.ruler import draw_mm_ruler
+from gui.common.ruler import draw_canvas_ruler, draw_mm_ruler
 from gui.common.zoomable import ZoomableCanvas, load_image_async
 
 CONTOUR_COLORS: dict[str, str] = {
@@ -24,10 +24,17 @@ CONTOUR_COLORS: dict[str, str] = {
 class AugInspectionApp:
     """Visual verification of augmented dataset with filtering."""
 
-    def __init__(self, root: tk.Tk, data_dir: str, switch_callback: Callable[[str], None] | None = None) -> None:
+    def __init__(
+        self,
+        root: tk.Tk,
+        data_dir: str,
+        switch_callback: Callable[..., None] | None = None,
+        initial_index: int = 0,
+    ) -> None:
         self.root = root
         self.data_dir = os.path.abspath(data_dir)
         self._switch = switch_callback
+        self.initial_index = initial_index
         self.records: list[dict[str, str]] = []
         self.filtered_indices: list[int] = []
         self.current_f_idx = 0
@@ -44,9 +51,9 @@ class AugInspectionApp:
         self._bind_events()
         # Defer the (potentially large) CSV/scan work until the window has
         # been drawn — this is what made the app feel like it opened slowly.
-        self.root.after(60, lambda: self._load_dataset(self.data_dir))
+        self.root.after(60, lambda: self._load_dataset(self.data_dir, self.initial_index))
 
-    def _load_dataset(self, folder: str) -> None:
+    def _load_dataset(self, folder: str, initial_idx: int = 0) -> None:
         self.data_dir = folder
         self.image_files, self.json_files = scan_directory(folder)
         self.records.clear()
@@ -69,6 +76,9 @@ class AugInspectionApp:
             messagebox.showerror("Ошибка парсинга CSV", str(exc))
             return
         self._apply_filter()
+        if self.filtered_indices:
+            self.current_f_idx = min(max(0, initial_idx), len(self.filtered_indices) - 1)
+            self._update_current_view()
         self.status_var.set(f"Загружено {len(self.records)} записей. Папка: {folder}")
 
     def _apply_filter(self, preserve_file_index: str | None = None) -> None:
@@ -106,23 +116,41 @@ class AugInspectionApp:
         self.root.geometry("1400x880")
         self.root.minsize(1080, 680)
 
-        top = ttk.Frame(self.root, padding=6)
+        top = ttk.Frame(self.root, padding=(6, 5))
         top.pack(side=tk.TOP, fill=tk.X)
-        ttk.Button(top, text="📁 Открыть папку...", command=self._choose_folder).pack(side=tk.LEFT, padx=3)
+
+        # 1. Единый блок переключения модулей
+        mod_frame = ttk.Frame(top)
+        mod_frame.pack(side=tk.LEFT)
+        ttk.Button(mod_frame, text="✂ Сегментация", command=lambda: self._nav("segmentation")).pack(side=tk.LEFT, padx=1)
+        ttk.Button(mod_frame, text="🔍 Инспектор", command=lambda: self._nav("inspection")).pack(side=tk.LEFT, padx=1)
+        ttk.Button(mod_frame, text="🔥 Аугментации", state="disabled").pack(side=tk.LEFT, padx=1)
+
+        ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill="y", padx=8)
+
+        # 2. Папка
+        ttk.Button(top, text="📁 Папка...", command=self._choose_folder).pack(side=tk.LEFT, padx=2)
+
         ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill="y", padx=6)
 
-        self.btn_prev = ttk.Button(top, text="◀ Назад", width=9, command=self.prev_item)
+        # 3. Навигация (единый стиль)
+        self.btn_prev = ttk.Button(top, text="◀ Назад", width=10, command=self.prev_item)
         self.btn_prev.pack(side=tk.LEFT, padx=2)
+        nav = ttk.Frame(top)
+        nav.pack(side=tk.LEFT, padx=4)
+        ttk.Label(nav, text="Семечка:").pack(side=tk.LEFT)
         self.pos_var = tk.StringVar(value="0")
-        self.pos_entry = ttk.Entry(top, textvariable=self.pos_var, width=6, justify="center")
-        self.pos_entry.pack(side=tk.LEFT, padx=3)
+        self.pos_entry = ttk.Entry(nav, textvariable=self.pos_var, width=6, justify="center")
+        self.pos_entry.pack(side=tk.LEFT, padx=4)
         self.pos_entry.bind("<Return>", self._on_goto_pos)
-        self.total_lbl = ttk.Label(top, text="из 0")
-        self.total_lbl.pack(side=tk.LEFT, padx=(0, 4))
-        self.btn_next = ttk.Button(top, text="Вперёд ▶", width=9, command=self.next_item)
+        self.total_lbl = ttk.Label(nav, text="из 0")
+        self.total_lbl.pack(side=tk.LEFT)
+        self.btn_next = ttk.Button(top, text="Вперёд ▶", width=10, command=self.next_item)
         self.btn_next.pack(side=tk.LEFT, padx=2)
 
         ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill="y", padx=6)
+
+        # 4. Фильтры и поиск
         ttk.Label(top, text="Фильтр:").pack(side=tk.LEFT, padx=(2, 2))
         self.filter_mode = tk.StringVar(value="Все")
         filter_combo = ttk.Combobox(top, textvariable=self.filter_mode,
@@ -132,22 +160,28 @@ class AugInspectionApp:
         filter_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_filter())
         ttk.Label(top, text="Поиск:").pack(side=tk.LEFT, padx=(6, 2))
         self.search_text = tk.StringVar(value="")
-        search_entry = ttk.Entry(top, textvariable=self.search_text, width=14)
+        search_entry = ttk.Entry(top, textvariable=self.search_text, width=13)
         search_entry.pack(side=tk.LEFT, padx=3)
         search_entry.bind("<KeyRelease>", lambda e: self._apply_filter())
         ttk.Button(top, text="Сброс", width=6, command=self._reset_filters).pack(side=tk.LEFT, padx=2)
 
         ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill="y", padx=6)
-        for text, cmd in [("+", lambda: self.zoom_widget.zoom_in()), ("-", lambda: self.zoom_widget.zoom_out()),
-                          ("1:1", lambda: self.zoom_widget.zoom_actual()), ("По окну", lambda: self.zoom_widget.zoom_fit())]:
-            ttk.Button(top, text=text, width=4, command=cmd).pack(side=tk.LEFT, padx=1)
-        self.zoom_lbl = ttk.Label(top, text="100%", width=6, anchor="center")
-        self.zoom_lbl.pack(side=tk.LEFT)
 
+        # 5. Единый блок масштабирования
+        zoom_frame = ttk.Frame(top)
+        zoom_frame.pack(side=tk.LEFT)
+        ttk.Button(zoom_frame, text="+", width=3, command=lambda: self.zoom_widget.zoom_in()).pack(side=tk.LEFT, padx=1)
+        ttk.Button(zoom_frame, text="-", width=3, command=lambda: self.zoom_widget.zoom_out()).pack(side=tk.LEFT, padx=1)
+        ttk.Button(zoom_frame, text="1:1", width=4, command=lambda: self.zoom_widget.zoom_actual()).pack(side=tk.LEFT, padx=1)
+        ttk.Button(zoom_frame, text="По окну", command=lambda: self.zoom_widget.zoom_fit()).pack(side=tk.LEFT, padx=1)
+        self.zoom_lbl = ttk.Label(zoom_frame, text="100%", width=6, anchor="center")
+        self.zoom_lbl.pack(side=tk.LEFT, padx=3)
+
+        # 6. Кнопки семьи и оригинала справа
         self.btn_family = ttk.Button(top, text="👨‍👧‍👦 Семья", command=self._filter_family)
-        self.btn_family.pack(side=tk.RIGHT, padx=4)
+        self.btn_family.pack(side=tk.RIGHT, padx=3)
         self.btn_orig = ttk.Button(top, text="🔍 К оригиналу", command=self._goto_original)
-        self.btn_orig.pack(side=tk.RIGHT, padx=4)
+        self.btn_orig.pack(side=tk.RIGHT, padx=3)
 
         self.status_var = tk.StringVar(value="Готов к работе")
         ttk.Label(self.root, textvariable=self.status_var, relief="sunken", anchor="w", padding=(6, 3)).pack(side=tk.BOTTOM, fill=tk.X)
@@ -159,10 +193,16 @@ class AugInspectionApp:
         paned.add(canvas_frame, weight=3)
         self.zoom_widget = ZoomableCanvas(canvas_frame, bg="#1a1a1a")
         self.zoom_widget.set_render_callback(self._draw_overlays)
+        self.zoom_widget.set_zoom_callback(lambda pct: self.zoom_lbl.config(text=f"{pct}%"))
 
         info_frame = ttk.Frame(paned, padding=8)
         paned.add(info_frame, weight=1)
         self._build_info_panel(info_frame)
+
+    def _nav(self, target: str) -> None:
+        if self._switch:
+            raw_idx = self.filtered_indices[self.current_f_idx] if self.filtered_indices else 0
+            self._switch(target, self.data_dir, raw_idx)
 
     def _build_info_panel(self, parent: ttk.Frame) -> None:
         vis_group = ttk.LabelFrame(parent, text="Отображение контура", padding=6)
@@ -404,6 +444,22 @@ class AugInspectionApp:
                 cr = 4
                 canvas.create_oval(cx - cr, cy - cr, cx + cr, cy + cr,
                                    fill="#00FFFF", outline="", tags=("overlay",))
+
+        # Отрисовка миллиметровой линейки
+        if self.show_ruler_var.get():
+            rec = self._current_record()
+            mm_per_px = self._parse_float(rec.get("mm_per_px"))
+            length_mm = self._parse_float(rec.get("length_mm"))
+            width_mm = self._parse_float(rec.get("width_mm"))
+            if not length_mm and rec.get("length_px") and mm_per_px:
+                length_mm = (self._parse_float(rec.get("length_px")) or 0.0) * mm_per_px
+            if not width_mm and rec.get("width_px") and mm_per_px:
+                width_mm = (self._parse_float(rec.get("width_px")) or 0.0) * mm_per_px
+            if mm_per_px and mm_per_px > 0:
+                draw_canvas_ruler(
+                    canvas, mm_per_px, scale, length_mm, width_mm,
+                    canvas_h=img.size[1], tag="overlay", color="#FF3333"
+                )
 
     @staticmethod
     def _parse_float(value: Any) -> float | None:

@@ -29,33 +29,43 @@ def _setup_tk_defaults(root: tk.Tk) -> None:
 def run_gui(initial_screen: str = "segmentation") -> None:
     """Run the GUI loop, allowing screen switching via callbacks."""
     screen: str | None = initial_screen
+    current_out_dir: str = DEFAULT_OUT_DIR
+    current_seed_index: int = 0
+
     while screen:
         next_screen: list[str | None] = [None]
         root = tk.Tk()
         _setup_tk_defaults(root)
         
-        def switch(target: str) -> None:
-            nonlocal screen
+        def switch(target: str, data_dir: str | None = None, seed_index: int = 0) -> None:
+            nonlocal screen, current_out_dir, current_seed_index
             next_screen[0] = target
+            if data_dir:
+                current_out_dir = data_dir
+            current_seed_index = seed_index
             root.destroy()
 
+        app = None
         match screen:
             case "segmentation":
                 from gui.segmentation_app import SegmentationApp
-                SegmentationApp(root, DEFAULT_OUT_DIR, switch_callback=switch)
+                app = SegmentationApp(root, current_out_dir, switch_callback=switch)
             case "inspection":
                 from gui.inspection_app import InspectionApp
-                InspectionApp(root, DEFAULT_OUT_DIR, switch_callback=switch)
+                app = InspectionApp(root, current_out_dir, switch_callback=switch, initial_index=current_seed_index)
             case "aug_inspection":
                 from gui.aug_inspection_app import AugInspectionApp
-                aug_dir = os.path.join(BASE_DIR, "out_aug")
-                data_dir = aug_dir if os.path.isdir(aug_dir) else DEFAULT_OUT_DIR
-                AugInspectionApp(root, data_dir, switch_callback=switch)
+                app = AugInspectionApp(root, current_out_dir, switch_callback=switch, initial_index=current_seed_index)
             case _:
                 root.destroy()
                 break
 
         root.mainloop()
+        if app is not None:
+            if hasattr(app, "data_dir") and getattr(app, "data_dir", None):
+                current_out_dir = app.data_dir
+            elif hasattr(app, "out_dir") and getattr(app, "out_dir", None):
+                current_out_dir = app.out_dir
         screen = next_screen[0]
 
 
