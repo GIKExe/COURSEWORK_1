@@ -27,7 +27,7 @@ BASE_COLUMNS = DEFAULT_CSV_FIELDS
 ALL_COLUMNS = BASE_COLUMNS + EXTRA_EDITABLE_FIELDS
 
 # --- Пакетный режим разметки has_groove -----------------------------------
-BATCH_COLS = 8                        # столбцов в сетке
+BATCH_COLS = 13                       # столбцов в сетке
 BATCH_ROWS = 4                        # строк в сетке
 BATCH_SIZE = BATCH_COLS * BATCH_ROWS  # изображений на одну страницу (32)
 BATCH_GAP = 12                        # отступ между ячейками, px
