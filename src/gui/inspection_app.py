@@ -1,4 +1,4 @@
-"""Inspection GUI: view/edit seed parameters and contours."""
+"""Инспектор семечек: просмотр и правка параметров и контуров."""
 from __future__ import annotations
 
 import json
@@ -8,7 +8,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageTk
 
 from core.contour_io import parse_raw_points
 from core.csv_utils import read_csv_robust, write_csv
@@ -25,6 +25,21 @@ POINT_HIT_RADIUS = 9
 
 BASE_COLUMNS = DEFAULT_CSV_FIELDS
 ALL_COLUMNS = BASE_COLUMNS + EXTRA_EDITABLE_FIELDS
+
+# --- Пакетный режим разметки has_groove -----------------------------------
+BATCH_COLS = 8                        # столбцов в сетке
+BATCH_ROWS = 4                        # строк в сетке
+BATCH_SIZE = BATCH_COLS * BATCH_ROWS  # изображений на одну страницу (32)
+BATCH_GAP = 12                        # отступ между ячейками, px
+BATCH_PLACEHOLDER_SIZE = (240, 160)   # размер ячейки, если файл не найден
+BATCH_BORDER = "#5A5A5A"              # рамка неизменённой ячейки
+BATCH_BORDER_MODIFIED = "#FF8C00"     # рамка ячейки с изменённым значением
+
+# Варианты выпадающего списка режимов просмотра.
+MODE_NORMAL = "Обычный режим"     # одиночный вид с разметкой
+MODE_WITH_GROOVE = "with groove"  # пакетный режим (сетка 8×4)
+MODE_WITHOUT_GROOVE = "without groove"  # пакетный режим (сетка 8×4)
+MODE_OPTIONS = (MODE_NORMAL, MODE_WITH_GROOVE, MODE_WITHOUT_GROOVE)
 
 
 def parse_float(value: Any) -> float | None:
@@ -48,7 +63,7 @@ def format_number(value: float | None) -> str:
 
 
 class InspectionApp:
-    """Seed parameter inspection and contour editing."""
+    """Просмотр и редактирование параметров семечек и их контуров."""
 
     def __init__(
         self,
@@ -80,17 +95,29 @@ class InspectionApp:
         self.drag_point_index: int | None = None
         self.contour_line_items: list[int] = []
         self.contour_point_items: list[int] = []
-        # Guards against stale async image decodes (see _load_current_media).
+        # Защита от устаревших асинхронных результатов (см. _load_current_media).
         self._image_gen = 0
         self._last_render_size: tuple[int, int] = (0, 0)
+
+        # --- Состояние пакетного режима разметки has_groove ---
+        self.batch_mode = False                       # включён ли пакетный режим
+        self.batch_label = ""                         # выбранный вариант режима (для статус-строки)
+        self.batch_page = 0                           # номер текущей пачки (с нуля)
+        self._batch_gen = 0                           # поколение отложенных загрузок (защита от устаревших ответов)
+        self._batch_rects: list[tuple[int, int, int, int, int]] = []  # (x0, y0, x1, y1, индекс записи)
+        self._batch_photos: dict[int, ImageTk.PhotoImage] = {}        # ссылки на PhotoImage ячеек
+        self._batch_check_vars: dict[int, tk.BooleanVar] = {}         # переменные чекбоксов ячеек
+        self._batch_original: dict[int, str] = {}     # индекс записи -> значение has_groove до правок
+        self._batch_size_cache: dict[str, tuple[int, int]] = {}       # кэш размеров файлов изображений
+        self._unsaved_before_batch = False            # были ли правки таблицы до входа в режим
 
         self.image_files: dict[str, str] = {}
         self.json_files: dict[str, str] = {}
         self._build_ui()
         self._bind_keys()
-        # Build the window first, then do CSV/dir-scan work when idle: the
-        # app used to feel slow to open because parsing happened before the
-        # first frame was ever drawn.
+        # Сначала создаём окно, а разбор CSV и сканирование папки выполняем
+        # в простое: раньше приложение открывалось медленно, потому что вся
+        # обработка шла до отрисовки первого кадра.
         def _startup() -> None:
             self._load_data()
             if self.records:
@@ -107,6 +134,10 @@ class InspectionApp:
         self.root.after_idle(_startup)
 
     def _load_data(self) -> None:
+        # Данные перечитаются с диска: прежние индексы пакетных правок и
+        # кэш размеров изображений становятся недостоверными.
+        self._batch_original.clear()
+        self._batch_size_cache.clear()
         self.image_files, self.json_files = scan_directory(self.data_dir)
         csv_path = os.path.join(self.data_dir, "seeds.csv")
         if not os.path.isfile(csv_path):
@@ -131,12 +162,7 @@ class InspectionApp:
             for col in self.fieldnames:
                 clean.setdefault(col, "")
             fi = clean.get("file_index", "")
-            is_aug = (
-                str(clean.get("is_aug", "0")).strip() in ("1", "True", "true")
-                or bool(clean.get("aug_of", "").strip())
-                or bool(re.search(r"_aug\d+$", fi))
-            )
-            if is_aug:
+            if self._is_aug_row(fi, clean):
                 self.aug_records.append(clean)
             else:
                 self.records.append(clean)
@@ -149,6 +175,19 @@ class InspectionApp:
                 status_set.add(r["status"].strip())
         self.shape_options = sorted(shape_set)
         self.status_options = sorted(status_set)
+
+    @staticmethod
+    def _is_aug_row(file_index: str, row: dict[str, str]) -> bool:
+        """Определить, относится ли строка CSV к аугментированной записи.
+
+        Используется и при загрузке, и при пакетном сохранении, чтобы
+        позиции строк в файле и в self.records совпадали.
+        """
+        return (
+            str(row.get("is_aug", "0") or "0").strip() in ("1", "True", "true")
+            or bool(str(row.get("aug_of") or "").strip())
+            or bool(re.search(r"_aug\d+$", str(file_index or "").strip()))
+        )
 
     def _build_ui(self) -> None:
         self.root.title("Контроль параметров семечек")
@@ -175,12 +214,25 @@ class InspectionApp:
 
         ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill="y", padx=6)
 
+        # 2.1 Выбор режима просмотра: одиночный вид или пакетная разметка
+        ttk.Label(top, text="Режим:").pack(side=tk.LEFT, padx=(0, 2))
+        self.mode_var = tk.StringVar(value=MODE_NORMAL)
+        self.mode_box = ttk.Combobox(
+            top, textvariable=self.mode_var, values=list(MODE_OPTIONS),
+            state="readonly", width=17,
+        )
+        self.mode_box.pack(side=tk.LEFT, padx=2)
+        self.mode_box.bind("<<ComboboxSelected>>", self._on_mode_change)
+
+        ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill="y", padx=6)
+
         # 3. Навигация по семенам (единый стиль)
         self.btn_prev = ttk.Button(top, text="◀ Назад", width=10, command=self.prev_seed)
         self.btn_prev.pack(side=tk.LEFT, padx=2)
         nav = ttk.Frame(top)
         nav.pack(side=tk.LEFT, padx=4)
-        ttk.Label(nav, text="Семечка:").pack(side=tk.LEFT)
+        self.pos_lbl = ttk.Label(nav, text="Семечка:")
+        self.pos_lbl.pack(side=tk.LEFT)
         self.pos_var = tk.StringVar(value="0")
         self.pos_entry = ttk.Entry(nav, textvariable=self.pos_var, width=6, justify="center")
         self.pos_entry.pack(side=tk.LEFT, padx=4)
@@ -195,19 +247,24 @@ class InspectionApp:
         # 4. Единый блок масштабирования
         zoom_frame = ttk.Frame(top)
         zoom_frame.pack(side=tk.LEFT)
-        ttk.Button(zoom_frame, text="+", width=3, command=lambda: self.zoom_widget.zoom_in()).pack(side=tk.LEFT, padx=1)
-        ttk.Button(zoom_frame, text="-", width=3, command=lambda: self.zoom_widget.zoom_out()).pack(side=tk.LEFT, padx=1)
-        ttk.Button(zoom_frame, text="1:1", width=4, command=lambda: self.zoom_widget.zoom_actual()).pack(side=tk.LEFT, padx=1)
-        ttk.Button(zoom_frame, text="По окну", command=lambda: self.zoom_widget.zoom_fit()).pack(side=tk.LEFT, padx=1)
+        self.btn_zoom_in = ttk.Button(zoom_frame, text="+", width=3, command=lambda: self.zoom_widget.zoom_in())
+        self.btn_zoom_in.pack(side=tk.LEFT, padx=1)
+        self.btn_zoom_out = ttk.Button(zoom_frame, text="-", width=3, command=lambda: self.zoom_widget.zoom_out())
+        self.btn_zoom_out.pack(side=tk.LEFT, padx=1)
+        self.btn_zoom_actual = ttk.Button(zoom_frame, text="1:1", width=4, command=lambda: self.zoom_widget.zoom_actual())
+        self.btn_zoom_actual.pack(side=tk.LEFT, padx=1)
+        self.btn_zoom_fit = ttk.Button(zoom_frame, text="По окну", command=lambda: self.zoom_widget.zoom_fit())
+        self.btn_zoom_fit.pack(side=tk.LEFT, padx=1)
         self.zoom_lbl = ttk.Label(zoom_frame, text="100%", width=6, anchor="center")
         self.zoom_lbl.pack(side=tk.LEFT, padx=3)
 
         # 5. Кнопки сохранения справа
-        ttk.Button(top, text="Сохранить контур", command=lambda: self._save_contour(show_message=True)).pack(side=tk.RIGHT, padx=(4, 0))
+        self.btn_save_contour = ttk.Button(top, text="Сохранить контур", command=lambda: self._save_contour(show_message=True))
+        self.btn_save_contour.pack(side=tk.RIGHT, padx=(4, 0))
         ttk.Button(top, text="Сохранить как...", command=self.save_as).pack(side=tk.RIGHT, padx=(4, 0))
         ttk.Button(top, text="Сохранить", command=self.save).pack(side=tk.RIGHT, padx=(4, 0))
 
-        main = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
+        main = self.main_paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         main.pack(fill='both', expand=True, padx=8, pady=(0, 8))
 
         img_frame = ttk.LabelFrame(main, text="Изображение", padding=6)
@@ -215,17 +272,17 @@ class InspectionApp:
         self.zoom_widget = ZoomableCanvas(img_frame)
         self.zoom_widget.set_render_callback(self._draw_contour_overlay)
         self.zoom_widget.set_zoom_callback(lambda pct: self.zoom_lbl.config(text=f"{pct}%"))
-        # Replace (not add to) the pan bindings that ZoomableCanvas sets up in
-        # its constructor:  while a contour point is grabbed our handlers
-        # return "break", so LMB drags move *only the point*, never the image;
-        # when no point is grabbed they fall back to scan_mark/scan_dragto, so
-        # plain panning of the picture still works.
+        # Заменяем (а не дополняем) обработчики перетаскивания, которые
+        # устанавливает ZoomableCanvas в конструкторе: пока захвачена точка
+        # контура, наши обработчики возвращают "break", поэтому ЛКМ двигает
+        # только точку, но не изображение; если точка не захвачена, управление
+        # переходит к scan_mark/scan_dragto, и картинку можно просто двигать.
         self.zoom_widget.canvas.bind("<ButtonPress-1>", self._on_left_press)
         self.zoom_widget.canvas.bind("<B1-Motion>", self._on_left_motion)
         self.zoom_widget.canvas.bind("<ButtonRelease-1>", self._on_left_release)
 
         def _pan_mark(event: tk.Event) -> None:
-            """Start pan only when no contour point was grabbed."""
+            """Начать перетаскивание, только если не захвачена точка контура."""
             if self.drag_point_index is None:
                 self.zoom_widget.canvas.scan_mark(event.x, event.y)
 
@@ -233,8 +290,8 @@ class InspectionApp:
             if self.drag_point_index is None:
                 self.zoom_widget.canvas.scan_dragto(event.x, event.y, gain=1)
 
-        # add="+" keeps our handlers above; they return "break" whenever a
-        # point is being dragged, so these pan handlers never run then.
+        # add="+" ставит наши обработчики поверх прежних; они возвращают
+        # "break", пока тащится точка, и эти обработчики тогда не срабатывают.
         self.zoom_widget.canvas.bind("<ButtonPress-1>", _pan_mark, add="+")
         self.zoom_widget.canvas.bind("<B1-Motion>", _pan_dragto, add="+")
         self.zoom_widget.canvas.bind("<Double-Button-1>", self._on_double_click)
@@ -243,6 +300,32 @@ class InspectionApp:
         params_frame = ttk.LabelFrame(main, text="Параметры", padding=10)
         main.add(params_frame, weight=1)
         self._build_form(params_frame)
+
+        # --- Панель пакетного режима (по умолчанию скрыта) ---------------
+        # Сетка 8×4 на холсте с полосами прокрутки: изображения выводятся в
+        # исходном пиксельном размере, без масштабирования и без разметки.
+        self.batch_frame = ttk.LabelFrame(
+            self.root,
+            text="Пакетная разметка has_groove — сетка 8×4, исходный размер изображений",
+            padding=6,
+        )
+        bwrap = ttk.Frame(self.batch_frame)
+        bwrap.pack(fill=tk.BOTH, expand=True)
+        bwrap.columnconfigure(0, weight=1)
+        bwrap.rowconfigure(0, weight=1)
+        self.batch_canvas = tk.Canvas(bwrap, bg="#202020", highlightthickness=0)
+        self.batch_canvas.grid(row=0, column=0, sticky="nsew")
+        bvbar = ttk.Scrollbar(bwrap, orient="vertical", command=self.batch_canvas.yview)
+        bvbar.grid(row=0, column=1, sticky="ns")
+        bhbar = ttk.Scrollbar(bwrap, orient="horizontal", command=self.batch_canvas.xview)
+        bhbar.grid(row=1, column=0, sticky="ew")
+        self.batch_canvas.configure(yscrollcommand=bvbar.set, xscrollcommand=bhbar.set)
+        # Клик по самому изображению перекляетает has_groove (чекбокс в углу
+        # ячейки обрабатывается своим событием, на холст оно не попадает).
+        self.batch_canvas.bind("<Button-1>", self._on_batch_click)
+        self.batch_canvas.bind("<MouseWheel>", self._on_batch_wheel)
+        self.batch_canvas.bind("<Button-4>", lambda e: self.batch_canvas.yview_scroll(-1, "units"))
+        self.batch_canvas.bind("<Button-5>", lambda e: self.batch_canvas.yview_scroll(1, "units"))
 
     def _nav(self, target: str) -> None:
         if self.dirty:
@@ -392,6 +475,15 @@ class InspectionApp:
     def _move(self, delta: int) -> None:
         if not self.records:
             return
+        if self.batch_mode:
+            # Пакетное листание: шаг равен одной пачке (32 записи).
+            new_page = self.batch_page + delta
+            if 0 <= new_page < self._batch_pages():
+                self.batch_page = new_page
+                self._render_batch_page()
+                self._update_nav()
+                self._update_statusbar()
+            return
         if self.dirty and not self._save_current(strict=True):
             return
         new_index = self.current + delta
@@ -401,6 +493,24 @@ class InspectionApp:
 
     def _on_goto(self, event: tk.Event | None = None) -> None:
         if not self.records:
+            return
+        if self.batch_mode:
+            # Поле ввода в пакетном режиме задаёт номер пачки (а не семечки).
+            try:
+                page = int(self.pos_var.get().strip())
+            except ValueError:
+                messagebox.showerror("Ошибка перехода", "Введите номер пачки числом.")
+                self.pos_var.set(str(self.batch_page + 1))
+                return
+            pages = self._batch_pages()
+            if 1 <= page <= pages:
+                self.batch_page = page - 1
+                self._render_batch_page()
+                self._update_nav()
+                self._update_statusbar()
+            else:
+                messagebox.showerror("Ошибка перехода", f"Допустимый диапазон: от 1 до {pages}.")
+                self.pos_var.set(str(self.batch_page + 1))
             return
         if self.dirty and not self._save_current(strict=True):
             return
@@ -418,12 +528,27 @@ class InspectionApp:
             self.pos_var.set(str(self.current + 1))
 
     def _update_all(self) -> None:
+        if self.batch_mode:
+            # Одиночный вид скрыт: обновляем только пакетную сетку и статус.
+            self._render_batch_page()
+            self._update_nav()
+            self._update_statusbar()
+            return
         self._update_nav()
         self._update_form()
         self._load_current_media()
         self._update_statusbar()
 
     def _update_nav(self) -> None:
+        if self.batch_mode:
+            # В пакетном режиме кнопки листают пачки по 32 записи; на границах
+            # списка (начало/конец) они блокируются — без зацикливания.
+            pages = self._batch_pages()
+            self.total_lbl.config(text=f"пачек: {pages}")
+            self.pos_var.set(str(self.batch_page + 1 if pages else 0))
+            self.btn_prev.config(state="normal" if self.batch_page > 0 else "disabled")
+            self.btn_next.config(state="normal" if self.batch_page < pages - 1 else "disabled")
+            return
         total = len(self.records)
         self.total_lbl.config(text=f"из {total}")
         if total:
@@ -434,6 +559,318 @@ class InspectionApp:
             self.pos_var.set("0")
             self.btn_prev.config(state="disabled")
             self.btn_next.config(state="disabled")
+
+    # ------------------------------------------------------------------
+    # Пакетный режим разметки has_groove (сетка 8×4, исходный размер)
+    # ------------------------------------------------------------------
+
+    def _batch_pages(self) -> int:
+        """Количество пачек по 32 записи (0, если записей нет)."""
+        if not self.records:
+            return 0
+        return -(-len(self.records) // BATCH_SIZE)
+
+    @staticmethod
+    def _groove_bool(record: dict[str, str]) -> bool:
+        """Значение has_groove записи в виде True/False."""
+        return str(record.get("has_groove", "")).strip() in ("1", "True", "true")
+
+    def _batch_is_modified(self, gi: int) -> bool:
+        """Отличается ли текущее значение has_groove от исходного."""
+        original = self._batch_original.get(gi)
+        if original is None or not (0 <= gi < len(self.records)):
+            return False
+        return str(self.records[gi].get("has_groove", "")).strip() != original
+
+    def _on_mode_change(self, event: tk.Event | None = None) -> None:
+        """Реакция на выбор режима в выпадающем списке.
+
+        Оба варианта «with groove» / «without groove» включают один и тот же
+        пакетный вид (сетка 8×4); выбранное название запоминается для
+        статус-строки. Любой другой вариант возвращает одиночный вид.
+        """
+        mode = self.mode_var.get()
+        if mode in (MODE_WITH_GROOVE, MODE_WITHOUT_GROOVE):
+            self._enter_batch_mode(mode)
+        else:
+            self._exit_batch_mode()
+
+    def _set_single_controls_enabled(self, enabled: bool) -> None:
+        """Включить/выключить элементы одиночного вида (зум и контур)."""
+        state = "normal" if enabled else "disabled"
+        for widget in (self.btn_zoom_in, self.btn_zoom_out, self.btn_zoom_actual,
+                       self.btn_zoom_fit, self.btn_save_contour):
+            try:
+                widget.config(state=state)
+            except Exception:
+                pass
+
+    def _enter_batch_mode(self, label: str) -> None:
+        """Переключить главный вид в пакетный режим разметки has_groove."""
+        if self.batch_mode:
+            # Уже в пакетном режиме: меняется только название варианта.
+            self.batch_label = label
+            self._update_statusbar()
+            return
+        # Правки формы одиночного вида переносим в память, чтобы не потерять.
+        if self.dirty and not self._save_current(strict=True):
+            self.mode_var.set(MODE_NORMAL)
+            return
+        if self.unsaved:
+            # Сохраняем накопленные правки таблицы заранее: кнопка «Сохранить»
+            # в пакетном режиме пишет только столбец has_groove.
+            ans = messagebox.askyesno(
+                "Сохранение",
+                "Есть несохранённые изменения таблицы.\n"
+                "Сохранить их в CSV перед переключением в пакетный режим?",
+            )
+            if ans and not self._write_csv(self.output_path, show_message=False):
+                self.mode_var.set(MODE_NORMAL)
+                return
+        if self.contour_dirty:
+            ans = messagebox.askyesnocancel(
+                "Несохраненный контур",
+                "Контур был изменен, но не сохранен.\n"
+                "Сохранить контур перед переключением в пакетный режим?",
+            )
+            if ans is None:
+                self.mode_var.set(MODE_NORMAL)
+                return
+            if ans and not self._save_contour(show_message=False):
+                self.mode_var.set(MODE_NORMAL)
+                return
+        self._unsaved_before_batch = self.unsaved
+        self.batch_mode = True
+        self.batch_label = label
+        # Показываем пачку, в которой находится текущая одиночная запись.
+        self.batch_page = (self.current // BATCH_SIZE) if self.records else 0
+        self.main_paned.pack_forget()
+        self.batch_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self._set_single_controls_enabled(False)
+        self.pos_lbl.config(text="Пачка:")
+        self._render_batch_page()
+        self._update_nav()
+        self._update_statusbar()
+
+    def _exit_batch_mode(self) -> None:
+        """Вернуть одиночный вид с разметкой изображения."""
+        if not self.batch_mode:
+            return
+        self.batch_mode = False
+        self.batch_label = ""
+        self._batch_gen += 1  # отменяем отложенные загрузки картинок пачки
+        # Освобождаем память: картинки и чекбоксы скрытой сетки не нужны.
+        self.batch_canvas.delete("all")
+        self._batch_photos.clear()
+        self._batch_check_vars.clear()
+        self._batch_rects.clear()
+        self.batch_frame.pack_forget()
+        self.main_paned.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self._set_single_controls_enabled(True)
+        self.pos_lbl.config(text="Семечка:")
+        self._update_all()
+
+    def _peek_image_size(self, path: str | None) -> tuple[int, int] | None:
+        """Размер изображения в пикселях (читаем только заголовок файла)."""
+        if not path:
+            return None
+        cached = self._batch_size_cache.get(path)
+        if cached is not None:
+            return cached
+        try:
+            with Image.open(path) as im:
+                size = im.size
+        except Exception:
+            return None
+        if size[0] > 0 and size[1] > 0:
+            self._batch_size_cache[path] = size
+            return size
+        return None
+
+    @staticmethod
+    def _batch_placeholder(w: int, h: int) -> Image.Image:
+        """Заглушка для записи, у которой не нашлось изображения."""
+        w, h = max(40, w), max(40, h)
+        img = Image.new("RGB", (w, h), (245, 245, 245))
+        draw = ImageDraw.Draw(img)
+        draw.text((8, h // 2 - 6), "изображение не найдено", fill=(140, 0, 0))
+        return img
+
+    def _render_batch_page(self) -> None:
+        """Отрисовать текущую пачку в сетке 8×4.
+
+        Изображения выводятся строго в исходном пиксельном размере
+        (никаких resize/zoom), поверх них — только рамка и чекбокс:
+        контуры, точки и линейка в этом режиме не рисуются.
+        """
+        canvas = self.batch_canvas
+        canvas.delete("all")
+        self._batch_photos.clear()
+        self._batch_check_vars.clear()
+        self._batch_rects.clear()
+        self._batch_gen += 1
+        gen = self._batch_gen
+
+        # Номер пачки приводим к допустимому диапазону.
+        pages = self._batch_pages()
+        self.batch_page = min(max(0, self.batch_page), pages - 1) if pages else 0
+        if not self.records:
+            canvas.configure(scrollregion=(0, 0, 1, 1))
+            return
+
+        start = self.batch_page * BATCH_SIZE
+        chunk = self.records[start:start + BATCH_SIZE]
+        count = len(chunk)
+        cols = min(BATCH_COLS, count)
+        rows = (count + cols - 1) // cols
+
+        # Размеры ячеек: заголовки файлов читаются без декодирования пикселей.
+        paths: list[str | None] = []
+        sizes: list[tuple[int, int]] = []
+        for rec in chunk:
+            path = self._find_image_path(rec)
+            paths.append(path)
+            sizes.append(self._peek_image_size(path) or BATCH_PLACEHOLDER_SIZE)
+
+        # Ширина столбца и высота строки — максимум по ячейкам, чтобы сетка
+        # оставалась ровной при слегка разном размере кадров.
+        col_w = [0] * cols
+        row_h = [0] * rows
+        for i, (w, h) in enumerate(sizes):
+            r, c = divmod(i, cols)
+            col_w[c] = max(col_w[c], w)
+            row_h[r] = max(row_h[r], h)
+        x_pos: list[int] = []
+        acc = 0
+        for w in col_w:
+            x_pos.append(acc)
+            acc += w + BATCH_GAP
+        y_pos: list[int] = []
+        acc = 0
+        for h in row_h:
+            y_pos.append(acc)
+            acc += h + BATCH_GAP
+        total_w = (x_pos[-1] + col_w[-1]) if cols else 1
+        total_h = (y_pos[-1] + row_h[-1]) if rows else 1
+        canvas.configure(scrollregion=(0, 0, total_w, total_h))
+        canvas.xview_moveto(0.0)
+        canvas.yview_moveto(0.0)
+
+        for i, rec in enumerate(chunk):
+            r, c = divmod(i, cols)
+            x, y = x_pos[c], y_pos[r]
+            w, h = sizes[i]
+            gi = start + i
+            # Рамка ячейки (подсвечивается оранжевым после изменения значения).
+            modified = self._batch_is_modified(gi)
+            canvas.create_rectangle(
+                x - 1, y - 1, x + w + 1, y + h + 1,
+                outline=BATCH_BORDER_MODIFIED if modified else BATCH_BORDER,
+                width=2 if modified else 1,
+                tags=("cell_border", f"border:{gi}"),
+            )
+            # Чекбокс в левом верхнем углу изображения.
+            var = tk.BooleanVar(value=self._groove_bool(rec))
+            cb = ttk.Checkbutton(canvas, variable=var, command=lambda g=gi: self._on_batch_check(g))
+            canvas.create_window(x, y, anchor="nw", window=cb, tags=("cell_cb",))
+            self._batch_check_vars[gi] = var
+            self._batch_rects.append((x, y, x + w, y + h, gi))
+            # Изображение: только исходные пиксели, без масштабирования.
+            if paths[i]:
+                load_image_async(paths[i], self._make_batch_loader(gen, x, y, gi), canvas)
+            else:
+                self._place_batch_image(gen, x, y, gi, None)
+
+    def _make_batch_loader(self, gen: int, x: int, y: int, gi: int):
+        """Замыкание-callback для асинхронной загрузки картинки ячейки."""
+
+        def _on_img(img: Image.Image | None) -> None:
+            self._place_batch_image(gen, x, y, gi, img)
+
+        return _on_img
+
+    def _place_batch_image(self, gen: int, x: int, y: int, gi: int, img: Image.Image | None) -> None:
+        """Поставить картинку ячейки на холст в её исходном размере."""
+        if gen != self._batch_gen or not self.batch_mode:
+            return  # страница уже сменилась — результат устарел
+        try:
+            if not self.batch_canvas.winfo_exists():
+                return
+        except Exception:
+            return
+        if img is None:
+            img = self._batch_placeholder(*BATCH_PLACEHOLDER_SIZE)
+        # PhotoImage создаётся из исходного изображения без каких-либо
+        # преобразований: на экране ровно столько пикселей, сколько в файле.
+        photo = ImageTk.PhotoImage(img)
+        self._batch_photos[gi] = photo
+        self.batch_canvas.create_image(x, y, anchor="nw", image=photo, tags=("cell_img", f"img:{gi}"))
+        # Рамка и чекбокс всегда поверх картинки.
+        self.batch_canvas.tag_raise("cell_border")
+        self.batch_canvas.tag_raise("cell_cb")
+
+    def _on_batch_wheel(self, event: tk.Event) -> None:
+        """Прокрутка сетки колесом мыши (с Shift — по горизонтали)."""
+        delta = 0
+        if getattr(event, "delta", 0):
+            delta = -1 if event.delta > 0 else 1
+        elif getattr(event, "num", None) == 4:
+            delta = -1
+        elif getattr(event, "num", None) == 5:
+            delta = 1
+        if delta == 0:
+            return
+        if getattr(event, "state", 0) & 0x0001:
+            self.batch_canvas.xview_scroll(delta, "units")
+        else:
+            self.batch_canvas.yview_scroll(delta, "units")
+
+    def _on_batch_click(self, event: tk.Event) -> None:
+        """Клик по изображению переключает has_groove этой ячейки."""
+        if not self.batch_mode:
+            return
+        cx = self.batch_canvas.canvasx(event.x)
+        cy = self.batch_canvas.canvasy(event.y)
+        for x0, y0, x1, y1, gi in self._batch_rects:
+            if x0 <= cx <= x1 and y0 <= cy <= y1:
+                self._set_batch_groove(gi, "0" if self._groove_bool(self.records[gi]) else "1")
+                return
+
+    def _on_batch_check(self, gi: int) -> None:
+        """Клик по чекбоксу: Tk уже переключил его переменную."""
+        var = self._batch_check_vars.get(gi)
+        if var is None or not (0 <= gi < len(self.records)):
+            return
+        self._set_batch_groove(gi, "1" if bool(var.get()) else "0")
+
+    def _set_batch_groove(self, gi: int, raw_value: str) -> None:
+        """Изменить has_groove записи в памяти и обновить только её ячейку."""
+        if not (0 <= gi < len(self.records)):
+            return
+        record = self.records[gi]
+        if gi not in self._batch_original:
+            self._batch_original[gi] = str(record.get("has_groove", "")).strip()
+        record["has_groove"] = raw_value
+        # Синхронизируем чекбокс (программная установка команду не вызывает).
+        expected = raw_value in ("1", "True", "true")
+        var = self._batch_check_vars.get(gi)
+        if var is not None and bool(var.get()) != expected:
+            var.set(expected)
+        self._update_batch_border(gi)
+        self.unsaved = True
+        self._update_statusbar()
+
+    def _update_batch_border(self, gi: int) -> None:
+        """Обновить рамку одной ячейки, не перерисовывая сетку."""
+        items = self.batch_canvas.find_withtag(f"border:{gi}")
+        if not items:
+            return
+        modified = self._batch_is_modified(gi)
+        self.batch_canvas.itemconfig(
+            items[0],
+            outline=BATCH_BORDER_MODIFIED if modified else BATCH_BORDER,
+            width=2 if modified else 1,
+        )
 
     def _update_color_badge(self, hex_code: str) -> None:
         if not hasattr(self, "color_badge"):
@@ -448,14 +885,14 @@ class InspectionApp:
         self.color_badge.configure(bg="#F0F0F0")
 
     def _recompute_current_color(self) -> str:
-        """Compute median color from current image and contour points."""
+        """Вычислить медианный цвет по текущему изображению и точкам контура."""
         src_img = getattr(self.zoom_widget, "_source_image", None) or self.zoom_widget.image
         if src_img is None or not self.contour_points or len(self.contour_points) < 3:
             return ""
         return compute_median_color_hex(src_img, self.contour_points)
 
     def _on_contour_modified(self) -> None:
-        """Update live color display when contour is changed."""
+        """Обновлять живой показ цвета при изменении контура."""
         src_img = getattr(self.zoom_widget, "_source_image", None) or self.zoom_widget.image
         if not self.records or src_img is None or len(self.contour_points) < 3:
             return
@@ -503,32 +940,33 @@ class InspectionApp:
         record = self.records[self.current]
         image_path = self._find_image_path(record)
 
-        # 1. Load contour data FIRST so self.contour_points is ready
-        # before any render callback fires (synchronous cache-hit or async).
+        # 1. Сначала загружаем данные контура, чтобы self.contour_points был
+        # готов до первого вызова отрисовки (и при синхронном, и при
+        # асинхронном способе загрузки).
         file_index = str(record.get("file_index", "")).strip()
         if not file_index and image_path:
             file_index = os.path.splitext(os.path.basename(image_path))[0]
         file_index = self._base_name(file_index)
         loaded = False
         if file_index:
-            # scan_directory keys JSONs by base name without extension.
+            # scan_directory хранит JSON-файлы по базовому имени без расширения.
             actual = self.json_files.get(f"{file_index}_contour".lower())
             if actual:
                 loaded = self._load_contour_file(os.path.join(self.data_dir, actual))
             if not loaded:
-                # The file may not have been in the scan yet (e.g. just created).
+                # Возможно, файла ещё не было в момент сканирования (например, он только что создан).
                 self.contour_path = os.path.join(self.data_dir, f"{file_index}_contour.json")
                 if not os.path.isfile(self.contour_path):
                     self.contour_path = None
-        # If the exact "<file_index>_contour.json" was missing, try to locate a
-        # contour JSON that matches the image actually found on disk.
+        # Если точного файла "<file_index>_contour.json" не нашлось, ищем
+        # контур, соответствующий изображению, найденному на диске.
         if self.contour_path is None and not loaded and image_path:
             img_base = self._base_name(image_path)
             actual = self.json_files.get(f"{img_base}_contour".lower())
             if actual:
                 loaded = self._load_contour_file(os.path.join(self.data_dir, actual))
 
-        # 2. Decode/set the image.
+        # 2. Декодируем и устанавливаем изображение.
         self._image_gen += 1
         gen = self._image_gen
         if image_path and os.path.isfile(image_path):
@@ -547,7 +985,7 @@ class InspectionApp:
         else:
             self.zoom_widget.set_image(self._make_placeholder(record))
 
-        # 3. Explicitly trigger overlay draw (for synchronous cached loads or immediate display)
+        # 3. Явно запускаем отрисовку наложения (для синхронной загрузки из кэша или мгновенного показа)
         self._draw_contour_overlay()
         src_img = getattr(self.zoom_widget, "_source_image", None) or self.zoom_widget.image
         if not record.get("color_hex") and self.contour_points and src_img is not None:
@@ -558,7 +996,7 @@ class InspectionApp:
                 self._update_color_badge(c_hex)
 
     def _load_contour_file(self, path: str) -> bool:
-        """Read contour points from *path*; return True on success."""
+        """Прочитать точки контура из *path*; True — успех."""
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
@@ -577,7 +1015,7 @@ class InspectionApp:
 
     @staticmethod
     def _base_name(name: str) -> str:
-        """Return *name* without directory part and without a known extension."""
+        """Вернуть *name* без каталога и без известного расширения."""
         base = os.path.basename(str(name).strip())
         lowered = base.lower()
         if lowered.endswith(IMAGE_EXTENSIONS) or lowered.endswith(".json"):
@@ -585,16 +1023,16 @@ class InspectionApp:
         return base
 
     def _image_by_base(self, base: str) -> str | None:
-        """Find an image file by its base name (case-insensitive, any extension)."""
+        """Найти изображение по базовому имени (без учёта регистра, любое расширение)."""
         if not base:
             return None
         key = base.lower()
-        # Fast path: exact base-name match from the directory scan
-        # (scan_directory keys images by name without extension).
+        # Быстрый путь: точное совпадение базового имени из скана папки
+        # (scan_directory хранит изображения по имени без расширения).
         actual = self.image_files.get(key)
         if actual:
             return os.path.join(self.data_dir, actual)
-        # Fallback: tolerate stray whitespace / partial names in the CSV.
+        # Запасной путь: терпим лишние пробелы и частичные имена из CSV.
         for stem, actual in self.image_files.items():
             stem = stem.strip()
             if stem == key or stem.startswith(key + "_") or key.startswith(stem + "_"):
@@ -611,8 +1049,8 @@ class InspectionApp:
             found = self._image_by_base(base)
             if found:
                 return found
-        # Last resort: "<file_index>_<seed index>" naming used by the exporter
-        # (e.g. file_index="1", index="3" -> "1_3.jpg").
+        # Последний вариант: схема имени "<file_index>_<номер семечки>",
+        # которую использует экспортёр (например file_index="1", index="3" -> "1_3.jpg").
         fi = self._base_name(record.get("file_index", ""))
         idx = self._base_name(record.get("index", ""))
         if fi and idx and fi != idx:
@@ -628,16 +1066,17 @@ class InspectionApp:
         return img
 
     def _render_image(self) -> None:
-        """Repaint overlays after a zoom/pan/edit without re-decoding photos.
+        """Перерисовать наложения после зума/сдвига/правки без повторного декодирования.
 
-        Full resize + PhotoImage conversion happens only when the geometry
-        actually changed (window resize / zoom buttons); plain edits such as
-        typing length/mm_per_px just redraw the cheap overlay layer.
+        Полный пересбор и преобразование в PhotoImage выполняются только при
+        реальном изменении геометрии (изменение размера окна, кнопки зума);
+        обычные правки, например ввод длины или мм/пиксель, лишь заново
+        рисуют дешёвый слой наложения.
         """
         if self.zoom_widget.image is not None:
             cw, ch = self.zoom_widget.canvas.winfo_width(), self.zoom_widget.canvas.winfo_height()
             if (cw, ch) != self._last_render_size:
-                # Geometry changed: rebuild the display bitmap at the new fit.
+                # Геометрия изменилась: пересобираем растровое изображение под новый масштаб.
                 self._last_render_size = (cw, ch)
                 self.zoom_widget.render()
             self._draw_contour_overlay()
@@ -645,9 +1084,9 @@ class InspectionApp:
 
     def _draw_contour_overlay(self) -> None:
         canvas = self.zoom_widget.canvas
-        # Remove items of previous frames first: without this every mouse-move
-        # during a drag would leave the old points/lines on the canvas and the
-        # widget would quickly freeze under thousands of stacked items.
+        # Сначала убираем элементы предыдущего кадра: иначе каждое движение
+        # мыши во время перетаскивания оставляло бы старые точки и линии на
+        # холсте, и виджет быстро замирал бы под тысячами накопленных элементов.
         canvas.delete("contour")
         self.contour_line_items = []
         self.contour_point_items = []
@@ -655,9 +1094,8 @@ class InspectionApp:
             return
         scale = self.zoom_widget.display_scale
         if len(self.contour_points) >= 2:
-            # Connect every point with its two neighbours along the polyline,
-            # and close the figure back to the first point (a segment between
-            # the last and the first point is drawn as well).
+            # Соединяем каждую точку с двумя соседями по ломаной и замыкаем
+            # контур на первую точку (отрезок между последней и первой тоже рисуем).
             coords: list[float] = []
             for x, y in self.contour_points:
                 coords.extend([x * scale, y * scale])
@@ -673,7 +1111,7 @@ class InspectionApp:
                                       tags=("contour", "contour_pt", f"pt:{i}"))
             self.contour_point_items.append(item)
 
-        # Draw vector ruler
+        # Рисуем векторную линейку
         record = self.records[self.current] if self.records and 0 <= self.current < len(self.records) else {}
         mm_per_px = parse_float(record.get("mm_per_px"))
         length_mm = parse_float(self.length_var.get()) or parse_float(record.get("length_mm"))
@@ -701,9 +1139,9 @@ class InspectionApp:
         canvas = self.zoom_widget.canvas
         cx = canvas.canvasx(event.x)
         cy = canvas.canvasy(event.y)
-        # Match against our own point list instead of find_overlapping():
-        # the base image item covers the whole canvas and would otherwise be
-        # hit by every click (and stale items confuse the index lookup).
+        # Ищем по своему списку точек, а не через find_overlapping(): элемент
+        # базового изображения покрывает весь холст и попадал бы под каждый
+        # клик (а устаревшие элементы путают определение индекса).
         if not self.contour_points or self.zoom_widget.display_scale <= 0:
             return None
         scale = self.zoom_widget.display_scale
@@ -713,25 +1151,25 @@ class InspectionApp:
             dist = math.hypot(x * scale - cx, y * scale - cy)
             if dist <= POINT_HIT_RADIUS and dist < best_dist:
                 best_dist, best_index = dist, i
-        del canvas  # no canvas items are needed for the lookup
+        del canvas  # элементы холста для поиска не нужны
         return best_index
 
     def _on_left_press(self, event: tk.Event) -> None:
         idx = self._find_point_at(event)
         if idx is not None and 0 <= idx < len(self.contour_points):
-            # Grab a point: start dragging it.  Returning "break" prevents the
-            # pan bindings (scan_mark/scan_dragto) from also moving the whole
-            # image while we drag the point — only the point moves.
+            # Захватываем точку и начинаем её тащить. Возврат "break" мешает
+            # обработчикам перетаскивания (scan_mark/scan_dragto) двигать
+            # всю картинку: во время перетаскивания двигается только точка.
             self.drag_point_index = idx
             self._update_point_handles()
             return "break"
-        # No point under the cursor: let the image be panned instead.  The
-        # companion _pan_mark/_pan_dragto handlers bound with add="+" do the
-        # actual scan_mark/scan_dragto; this handler just does nothing.
+        # Под курсором точки нет — пусть картинку двигают панорамные
+        # обработчики _pan_mark/_pan_dragto (подключены через add="+");
+        # этот обработчик здесь ничего не делает.
         return None
 
     def _update_point_handles(self) -> None:
-        """Move only the dragged handle and the contour lines (fast drag path)."""
+        """Передвигает только перетаскиваемую ручку и линии контура (быстрый путь)."""
         if self.drag_point_index is None:
             return
         scale = self.zoom_widget.display_scale
@@ -744,8 +1182,8 @@ class InspectionApp:
         coords: list[float] = []
         for px, py in self.contour_points:
             coords.extend([px * scale, py * scale])
-        # Keep the closing segment (last point -> first point) in sync with
-        # the dragged point, exactly like _draw_contour_overlay builds it.
+        # Замыкающий отрезок (последняя -> первая точка) синхронизируем с
+        # перетаскиваемой точкой — так же, как его строит _draw_contour_overlay.
         coords.extend([self.contour_points[0][0] * scale, self.contour_points[0][1] * scale])
         for line_item in self.contour_line_items:
             canvas.coords(line_item, *coords)
@@ -757,7 +1195,7 @@ class InspectionApp:
                 self.contour_points[self.drag_point_index] = pt
                 self.contour_dirty = True
                 self._update_point_handles()
-            # Never let the pan handler move the image during a point drag.
+            # Никогда не даём панорамному обработчику двигать картинку во время перетаскивания точки.
             return "break"
 
     def _on_left_release(self, event: tk.Event) -> None:
@@ -768,7 +1206,7 @@ class InspectionApp:
 
     @staticmethod
     def _dist_to_segment(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
-        """Distance from point P to segment AB (2D)."""
+        """Расстояние от точки P до отрезка AB (2D)."""
         vx, vy = bx - ax, by - ay
         wx, wy = px - ax, py - ay
         len2 = vx * vx + vy * vy
@@ -778,12 +1216,12 @@ class InspectionApp:
         return math.hypot(wx - t * vx, wy - t * vy)
 
     def _insertion_index(self, pt: tuple[float, float]) -> int:
-        """Index at which a new point must be inserted so that it connects to
-        its two nearest neighbours along the contour (the endpoints of the
-        closest existing segment), not to the first/last points of the list.
+        """Позиция, в которую нужно вставить новую точку, чтобы она соединилась
+        с двумя ближайшими соседями вдоль контура (концами ближайшего
+        существующего отрезка), а не с первыми/последними точками списка.
 
-        With fewer than 2 points there is no segment to attach to, so the
-        point is simply appended.
+        При менее чем 2 точках отрезка для присоединения нет, поэтому точка
+        просто добавляется в конец.
         """
         pts = self.contour_points
         n = len(pts)
@@ -793,7 +1231,7 @@ class InspectionApp:
         best_seg, best_d = 0, float("inf")
         for i in range(n):
             ax, ay = pts[i]
-            bx, by = pts[(i + 1) % n]  # closing segment last->first included
+            bx, by = pts[(i + 1) % n]  # замыкающий отрезок: последняя -> первая
             d = self._dist_to_segment(px, py, ax, ay, bx, by)
             if d < best_d:
                 best_d, best_seg = d, i
@@ -808,8 +1246,8 @@ class InspectionApp:
         if pt is None:
             return
         if self.contour_path is None:
-            # No existing JSON yet: create one next to the image so that the
-            # new contour actually has somewhere to be saved.
+            # JSON ещё нет: создаём его рядом с изображением, чтобы новому
+            # контуру было куда сохраняться.
             record = self.records[self.current] if self.records else {}
             file_index = str(record.get("file_index", "")).strip()
             if not file_index:
@@ -820,10 +1258,9 @@ class InspectionApp:
                 return
             self.contour_path = os.path.join(self.data_dir, f"{file_index}_contour.json")
             self.contour_meta = {}
-        # Insert the point after its two nearest neighbours (the endpoints of
-        # the closest existing contour segment) instead of appending it to the
-        # end of the list, which used to wire the new point straight to the
-        # first and last points of the contour.
+        # Вставляем точку после её двух ближайших соседей (концов ближайшего
+        # существующего отрезка контура), а не в конец списка: иначе новая
+        # точка соединялась бы напрямую с первой и последней точками контура.
         self.contour_points.insert(self._insertion_index(pt), pt)
         self.contour_dirty = True
         self._draw_contour_overlay()
@@ -833,9 +1270,9 @@ class InspectionApp:
     def _on_right_click(self, event: tk.Event) -> None:
         idx = self._find_point_at(event)
         if idx is not None and 0 <= idx < len(self.contour_points):
-            # Actually delete the point (the old code kept the same canvas
-            # items with stale "pt:<i>" tags, which only re-wired the lines
-            # between the remaining points).
+            # На самом деле удаляем точку (старый код оставлял те же элементы
+            # холста с устаревшими тегами "pt:<i>", которые лишь заново
+            # связывали линии между оставшимися точками).
             del self.contour_points[idx]
             self.contour_dirty = True
             self._draw_contour_overlay()
@@ -868,14 +1305,14 @@ class InspectionApp:
                 json.dump(payload, fh, ensure_ascii=False, indent=2)
             self.contour_dirty = False
 
-            # Recalculate color from modified contour and update record + UI
+            # Пересчитываем цвет по изменённому контуру и обновляем запись и интерфейс
             hex_code = self._recompute_current_color()
             if hex_code:
                 record["color_hex"] = hex_code
                 self.color_hex_var.set(hex_code)
                 self._update_color_badge(hex_code)
 
-            # Persist updated color to seeds.csv
+            # Сохраняем обновлённый цвет в seeds.csv
             if self.output_path:
                 self._write_csv(self.output_path, show_message=False)
 
@@ -894,7 +1331,7 @@ class InspectionApp:
 
     def _mark_dirty_and_render(self, event: tk.Event | None = None) -> None:
         self._mark_dirty(event)
-        # Coalesce rapid keystrokes into one overlay repaint per idle cycle.
+        # Схлопываем серию быстрых нажатий в одну перерисовку наложения за цикл простоя.
         if getattr(self, "_render_after_id", None):
             try:
                 self.root.after_cancel(self._render_after_id)
@@ -949,6 +1386,10 @@ class InspectionApp:
         return True
 
     def save(self) -> bool:
+        # В пакетном режиме «Сохранить» пишет только изменённые значения
+        # has_groove — остальные столбцы и строки файла не затрагиваются.
+        if self.batch_mode:
+            return self._save_batch_grooves()
         if self.dirty and not self._save_current(strict=True):
             return False
         if self.contour_dirty:
@@ -959,6 +1400,57 @@ class InspectionApp:
         if not self.output_path:
             self.output_path = os.path.join(self.data_dir, "seeds.csv")
         return self._write_csv(self.output_path)
+
+    def _save_batch_grooves(self) -> bool:
+        """Записать в seeds.csv только изменённые значения has_groove.
+
+        Файл перечитывается целиком, но изменяется исключительно столбец
+        has_groove у записей, поправленных пользователем: остальные строки
+        и столбцы сохраняются ровно как были.
+        """
+        if not self.output_path:
+            self.output_path = os.path.join(self.data_dir, "seeds.csv")
+        changed = [gi for gi in self._batch_original if self._batch_is_modified(gi)]
+        if not changed:
+            # Правок нет — файл не трогаем.
+            self.unsaved = self._unsaved_before_batch
+            self._update_statusbar()
+            messagebox.showinfo("Сохранение", "Изменений has_groove нет — файл не изменялся.")
+            return True
+        try:
+            fieldnames, rows = read_csv_robust(self.output_path)
+        except Exception as exc:
+            messagebox.showerror("Ошибка сохранения", f"Не удалось перечитать CSV:\n{exc}")
+            return False
+        # Строки без аугментаций идут в файле в том же порядке, что и в
+        # self.records, поэтому сопоставляем записи по позиции.
+        row_positions = [
+            i for i, row in enumerate(rows)
+            if not self._is_aug_row(str(row.get("file_index") or "").strip(), row)
+        ]
+        if "has_groove" not in fieldnames:
+            fieldnames.append("has_groove")
+        updated = 0
+        for gi in sorted(changed):
+            if gi >= len(row_positions):
+                break
+            rows[row_positions[gi]]["has_groove"] = str(self.records[gi].get("has_groove", "")).strip()
+            updated += 1
+        try:
+            write_csv(self.output_path, fieldnames, rows)
+        except Exception as exc:
+            messagebox.showerror("Ошибка сохранения", str(exc))
+            return False
+        # Правки зафиксированы: исходными считаем уже новые значения.
+        self._batch_original.clear()
+        self.unsaved = self._unsaved_before_batch
+        # Убираем подсветку изменённых ячеек текущей пачки.
+        start = self.batch_page * BATCH_SIZE
+        for gi in range(start, min(start + BATCH_SIZE, len(self.records))):
+            self._update_batch_border(gi)
+        self._update_statusbar()
+        messagebox.showinfo("Сохранение", f"Обновлено значений has_groove: {updated}\n{self.output_path}")
+        return True
 
     def save_as(self) -> bool:
         if self.dirty and not self._save_current(strict=True):
@@ -1031,6 +1523,17 @@ class InspectionApp:
             text = self.load_error
         elif not self.records:
             text = "Нет записей. Проверьте папку и файл seeds.csv."
+        elif self.batch_mode:
+            total = len(self.records)
+            start = self.batch_page * BATCH_SIZE
+            end = min(total, start + BATCH_SIZE)
+            modified = sum(1 for gi in self._batch_original if self._batch_is_modified(gi))
+            text = (
+                f"Пакетный режим «{self.batch_label}» | пачка {self.batch_page + 1}/{self._batch_pages()} "
+                f"| записи {start + 1}–{end} из {total} | изменено has_groove: {modified}"
+            )
+            if self.unsaved:
+                text += " | есть несохранённые изменения"
         else:
             record = self.records[self.current]
             text = f"Запись {self.current + 1}/{len(self.records)} | file_index={record.get('file_index', '')}"
