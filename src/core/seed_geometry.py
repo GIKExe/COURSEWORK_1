@@ -251,87 +251,185 @@ def rgb_averaged(image_bgr: np.ndarray, contour: np.ndarray | None) -> tuple[flo
     return float(mean[2]), float(mean[1]), float(mean[0])
 
 
-def groove_score(image_bgr: np.ndarray, contour: np.ndarray | None, angle_hint: float | None = None) -> float:
-    """Strength of the longitudinal groove (dark stripe along the seed axis).
+# --- Детектор бороздки -------------------------------------------------------
+# Порог бинаризации признака "has_groove". Подобран на размеченных снимках
+# images/2_1.jpg (без бороздки) и images/2_1p.jpg (с бороздкой): на полосе
+# значений 10...13 точность обеих групп держится выше 92%.
+GROOVE_SCORE_THRESHOLD = 11.0
 
-    Only pixels inside the eroded contour are analysed: the brightness of a
-    narrow band around the length axis is compared against the flanks on both
-    sides in four segments along the length.  A persistent central darkening
-    (the groove facing the camera) gives a high score; a smooth back gives
-    roughly zero.
-    """
-    if image_bgr is None or contour is None:
-        return 0.0
-    axis = length_axis(contour)
-    if axis is None:
-        return 0.0
-    _, ang, _ = axis
+# Поперёчная геометрия анализа (в долях полуширины зерна в данной колонке):
+_GROOVE_ZONE = 0.60    # зона анализа: края зерна отсекаем — они тёмные из-за
+                       # трёхмерного затенения и дали бы ложный "гребень"
+_GROOVE_INNER = 0.35   # центральная полоса, в которой ищется минимум профиля
+_GROOVE_OUTER = 0.42   # отсюда берётся уровень соседних участков для сравнения
+
+
+def _gray_from(image: np.ndarray) -> np.ndarray | None:
+    """Привести регион изображения к оттенкам серого uint8."""
+    if image is None:
+        return None
+    if image.ndim == 2:
+        return image.copy()
+    ch = image.shape[2]
+    if ch == 3:
+        return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    if ch == 4:
+        return cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY)
+    return image[:, :, 0].copy()
+
+
+def _axis_angle(mask: np.ndarray, angle_hint: float | None) -> float | None:
+    """Направление длинной оси зерна в градусах: подсказка или PCA по маске."""
     if angle_hint is not None:
         try:
-            ang = float(angle_hint) % 180.0
+            value = float(angle_hint)
         except (TypeError, ValueError):
-            pass
+            value = math.nan
+        if math.isfinite(value):
+            return value % 180.0
+    ys, xs = np.where(mask > 0)
+    if xs.size < 50:
+        return None
+    cx, cy = float(xs.mean()), float(ys.mean())
+    cov_xx = float(np.var(xs))
+    cov_yy = float(np.var(ys))
+    cov_xy = float(np.mean((xs - cx) * (ys - cy)))
+    return math.degrees(0.5 * math.atan2(2.0 * cov_xy, cov_xx - cov_yy))
+
+
+def _rotate_to_axis(
+    gray: np.ndarray, mask: np.ndarray, angle_deg: float, center: tuple[float, float],
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Развернуть изображение и маску так, чтобы длинная ось стала горизонтальной.
+
+    Холст выбирается с запасом по диагонали, чтобы при повороте ничего
+    не обрезалось. Если после поворота зерно оказалось вертикальным —
+    доворачиваем ещё на 90°.
+    """
+    side = int(math.hypot(mask.shape[1], mask.shape[0])) + 8
+    if side < 16:
+        return None
+    cxy = side // 2
+    ox, oy = cxy - int(round(center[0])), cxy - int(round(center[1]))
+    if ox < 0 or oy < 0 or ox + gray.shape[1] > side or oy + gray.shape[0] > side:
+        return None
+    big_gray = np.zeros((side, side), dtype=np.uint8)
+    big_mask = np.zeros((side, side), dtype=np.uint8)
+    big_gray[oy:oy + gray.shape[0], ox:ox + gray.shape[1]] = gray
+    big_mask[oy:oy + mask.shape[0], ox:ox + mask.shape[1]] = mask
+
+    for ang in (angle_deg, angle_deg + 90.0):
+        M = cv2.getRotationMatrix2D((float(cxy), float(cxy)), float(ang), 1.0)
+        g = cv2.warpAffine(big_gray, M, (side, side), flags=cv2.INTER_LINEAR, borderValue=0)
+        m = cv2.warpAffine(big_mask, M, (side, side), flags=cv2.INTER_NEAREST, borderValue=0)
+        ys, xs = np.where(m > 0)
+        if xs.size > 10 and (xs.max() - xs.min()) >= (ys.max() - ys.min()):
+            return cv2.GaussianBlur(g, (3, 3), 0), m
+    return None
+
+
+def groove_score(
+    image_bgr: np.ndarray,
+    contour: np.ndarray | None,
+    angle_hint: float | None = None,
+) -> float | None:
+    """Сила продольной бороздки зерна (60-й процентиль контраста тёмного гребня).
+
+    Принцип работы:
+      1. Зерно разворачивается так, чтобы его длинная ось была горизонтальной
+         (ориентация не важна — снимки могут быть любыми).
+      2. Для каждой колонки вдоль оси строится профиль яркости поперёк зерна.
+      3. Внутри центральной зоны (|u| <= 0.35 полуширины) ищется минимум
+         профиля; его контраст к соседним участкам (|u| >= 0.42) и есть отклик
+         на бороздку.
+      4. Итоговый балл — 60-й процентиль контрастов по всем колонкам.
+
+    Такая схема устойчива к ориентации и изгибу зерна: бороздка повторяет
+    центральную линию формы, а её тёмное дно даёт устойчивый минимум. Затемнённые
+    края отсечены зоной 0.6, поперечная трещина затемняет колонку целиком
+    (и минимум, и соседи темнеют вместе — контраста не возникает), случайная
+    косая трещина пересекает центр лишь в нескольких колонках и на средний
+    процентиль почти не влияет.
+    """
+    if image_bgr is None or contour is None:
+        return None
     pts = np.asarray(contour, dtype=np.int32).reshape(-1, 2)
     if len(pts) < 3:
-        return 0.0
+        return None
     x, y, w, h = cv2.boundingRect(pts.reshape(-1, 1, 2))
+    if w < 8 or h < 8:
+        return None
     img_h, img_w = image_bgr.shape[:2]
-    x0, y0 = max(0, int(x)), max(0, int(y))
-    x1, y1 = min(img_w, int(x + w)), min(img_h, int(y + h))
-    if x1 - x0 < 12 or y1 - y0 < 12:
-        return 0.0
-    crop = image_bgr[y0:y1, x0:x1]
-    cw, chh = x1 - x0, y1 - y0
-    mask = np.zeros((chh, cw), dtype=np.uint8)
+    pad = 2
+    x0, y0 = max(0, x - pad), max(0, y - pad)
+    x1, y1 = min(img_w, x + w + pad), min(img_h, y + h + pad)
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return None
+
+    gray = _gray_from(image_bgr[y0:y1, x0:x1])
+    if gray is None:
+        return None
+    mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
     cv2.drawContours(mask, [(pts - np.array([x0, y0])).reshape(-1, 1, 2)], -1, 255, thickness=cv2.FILLED)
-    erode_k = max(3, int(min(cw, chh) * 0.12) | 1)
-    inner = cv2.erode(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erode_k, erode_k)))
-    if cv2.countNonZero(inner) < 60:
-        inner = mask
-    if cv2.countNonZero(inner) < 60:
-        return 0.0
-    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY).astype(np.float32)
-    gray = cv2.GaussianBlur(gray, (5, 5), 0)
-    rad = math.radians(ang)
-    ux, uy = math.cos(rad), math.sin(rad)
-    vx, vy = -uy, ux
-    ys, xs = np.mgrid[0:chh, 0:cw].astype(np.float32)
-    t = xs * ux + ys * uy   # coordinate along the seed length
-    s = xs * vx + ys * vy   # coordinate across the seed width
-    sel_m = mask > 0
-    sv_all = s[sel_m]
-    if sv_all.size < 20:
-        return 0.0
-    s_center = float(np.median(sv_all))
-    s_span = float(np.percentile(sv_all, 97) - np.percentile(sv_all, 3))
-    half_core = max(3.0, s_span * 0.12)
-    half_flank = max(3.0, s_span * 0.30)
-    ds = np.abs(s - s_center)
-    core = (inner > 0) & (ds <= half_core)
-    flank = (inner > 0) & (ds > half_flank)
-    if core.sum() < 20 or flank.sum() < 20:
-        return 0.0
-    tv = t[core]
-    gv = gray[core]
-    flank_mean = float(np.mean(gray[flank]))
-    bins = np.quantile(tv, [0.0, 0.25, 0.5, 0.75, 1.0])
-    deltas: list[float] = []
-    dark_segments = 0
-    for k in range(4):
-        seg = (tv >= bins[k]) & (tv <= bins[k + 1])
-        if seg.sum() < 5:
+    if cv2.countNonZero(mask) < 100:
+        return None
+
+    ys_m, xs_m = np.where(mask > 0)
+    angle = _axis_angle(mask, angle_hint)
+    if angle is None:
+        return None
+    rotated = _rotate_to_axis(gray, mask, angle, (float(xs_m.mean()), float(ys_m.mean())))
+    if rotated is None:
+        return None
+    gray_r, mask_r = rotated
+
+    cols = np.where(mask_r.any(axis=0))[0]
+    if len(cols) < 8:
+        return None
+    contrasts: list[float] = []
+    for xc in cols:
+        ys = np.where(mask_r[:, xc] > 0)[0]
+        if len(ys) < 8:
             continue
-        delta = flank_mean - float(np.mean(gv[seg]))  # > 0 when the core is darker
-        deltas.append(delta)
-        if delta > 1.0:
-            dark_segments += 1
-    if not deltas:
-        return 0.0
-    fraction = dark_segments / len(deltas)
-    depth = float(np.mean(deltas))
-    if fraction < 0.5 or depth <= 0.0:
-        return 0.0
-    return depth * fraction
+        center = 0.5 * (ys.min() + ys.max())
+        half = 0.5 * (ys.max() - ys.min())
+        if half < 5:
+            continue
+        u = (ys - center) / half
+        sel = np.abs(u) <= _GROOVE_ZONE
+        if int(sel.sum()) < 6:
+            continue
+        uu = u[sel]
+        prof = gray_r[ys[sel], xc].astype(np.float64)
+        order = np.argsort(uu)
+        uu, prof = uu[order], prof[order]
+        if len(prof) >= 5:  # лёгкое сглаживание шума резкости
+            prof = np.convolve(np.pad(prof, (1, 1), mode="edge"), np.ones(3) / 3.0, mode="valid")
+        inner = np.abs(uu) <= _GROOVE_INNER
+        if int(inner.sum()) < 3:
+            continue
+        outer = np.abs(uu) >= _GROOVE_OUTER
+        if int(outer.sum()) < 2:
+            continue
+        i_min = int(np.argmin(np.where(inner, prof, np.inf)))
+        contrasts.append(float(prof[outer].mean()) - float(prof[i_min]))
+    if len(contrasts) < 8:
+        return None
+    return float(np.percentile(np.asarray(contrasts, dtype=np.float64), 60))
+
+
+def groove_presence(
+    image_bgr: np.ndarray,
+    contour: np.ndarray | None,
+    *,
+    angle_hint: float | None = None,
+    threshold: float = GROOVE_SCORE_THRESHOLD,
+) -> int | None:
+    """Бинарный признак наличия бороздки: 1 — есть, 0 — нет, None — не определить."""
+    score = groove_score(image_bgr, contour, angle_hint=angle_hint)
+    if score is None:
+        return None
+    return 1 if score >= threshold else 0
 
 
 def compute_seed_metrics(
@@ -339,14 +437,15 @@ def compute_seed_metrics(
     contour: np.ndarray | None,
     *,
     angle_hint: float | None = None,
-    groove_threshold: float = 3.0,
+    groove_threshold: float = GROOVE_SCORE_THRESHOLD,
 ) -> dict[str, Any]:
-    """Compute contour-based metrics for one seed.
+    """Вычислить метрики одного зерна по его контуру.
 
-    Returns a dict with ``rgb_averaged``, ``groove`` (0/1) and the length-axis
-    measurements (``length_px`` / ``angle_deg`` plus the endpoint coordinates).
+    Возвращает словарь с ``rgb_averaged``, ``groove`` (1 — бороздка есть,
+    0 — нет, None — признак определить не удалось), ``groove_score`` и
+    измерениями длинной оси (``length_px`` / ``angle_deg``).
     """
-    result: dict[str, Any] = {"rgb_averaged": None, "color_hex": "", "groove": None, "groove_score": 0.0}
+    result: dict[str, Any] = {"rgb_averaged": None, "color_hex": "", "groove": None, "groove_score": None}
     axis = length_axis(contour)
     if axis is not None:
         length_px, angle_deg, dist = axis
@@ -358,7 +457,7 @@ def compute_seed_metrics(
         result["rgb_averaged"] = f"{rgb[0]:.1f};{rgb[1]:.1f};{rgb[2]:.1f}"
     result["color_hex"] = compute_median_color_hex(image_bgr, contour, is_rgb=False)
     score = groove_score(image_bgr, contour, angle_hint=angle_hint)
-    result["groove_score"] = round(score, 3)
-    if rgb is not None or axis is not None:
+    if score is not None:
+        result["groove_score"] = round(score, 3)
         result["groove"] = 1 if score >= groove_threshold else 0
     return result

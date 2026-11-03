@@ -11,7 +11,7 @@ from core.contour_io import save_contour_json
 from core.csv_utils import update_seeds_csv
 from core.io_utils import fmt_float, imwrite_unicode, sanitize_filename
 from core.models import ExportSummary, SeedItem
-from core.seed_geometry import compute_median_color_hex
+from core.seed_geometry import compute_median_color_hex, groove_presence
 
 
 def make_source_name(image_path: str) -> str:
@@ -84,6 +84,7 @@ def build_seed_csv_row(
     seed_index: int,
     mm_per_px: float | None,
     color_hex: str = "",
+    has_groove: int | None = None,
 ) -> dict[str, Any]:
     length_px = item.get("length_px")
     width_px = item.get("width_px")
@@ -98,6 +99,8 @@ def build_seed_csv_row(
         "width_px": fmt_float(width_px, 3),
         "angle_deg": fmt_float(item.get("angle_deg", item.get("angle")), 3),
         "area_px": fmt_float(item.get("area"), 1),
+        # Бинарный признак бороздки: 1 — есть, 0 — нет
+        "has_groove": "" if has_groove is None else int(has_groove),
         "mm_per_px": fmt_float(mm_per_px, 8) if mm_per_px is not None else "",
     }
 
@@ -176,7 +179,14 @@ def export_seed_items(
         color_hex = str(item.get("color_hex") or "")
         if not color_hex and item.get("contour") is not None:
             color_hex = compute_median_color_hex(image_bgr, item.get("contour"))
-        saved_rows.append(build_seed_csv_row(item, file_index, seed_index, mm_per_px, color_hex=color_hex))
+        # Признак бороздки: берём из уже посчитанных метрик, а если его нет —
+        # считаем прямо по фрагменту исходного изображения
+        has_groove = item.get("groove")
+        if has_groove not in (0, 1) and item.get("contour") is not None:
+            has_groove = groove_presence(image_bgr, item.get("contour"))
+        saved_rows.append(build_seed_csv_row(
+            item, file_index, seed_index, mm_per_px, color_hex=color_hex, has_groove=has_groove,
+        ))
 
     try:
         remove_group_files_except(out_dir, source_name, summary["saved_file_indexes"])

@@ -36,6 +36,7 @@ IMAGE_EXTENSIONS: tuple[str, ...] = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".
 DEFAULT_CSV_FIELDS: list[str] = [
     "file_index", "index", "status", "color_hex", "edge_width_px",
     "length_px", "width_px", "angle_deg", "area_px",
+    "has_groove",
     "mm_per_px",
 ]
 
@@ -71,6 +72,8 @@ class SeedItem(SeedCandidate, total=False):
     edge_width: float | None
     status: str
     color_hex: str
+    groove: int | None
+    groove_score: float | None
     index: int
 
 
