@@ -49,6 +49,10 @@ SKIP_CSV_FIELDS: frozenset[str] = frozenset({
 AUG_EXTRA_FIELDS: list[str] = ["source", "split", "is_aug", "aug_of"]
 
 
+def is_augmentation(record: dict[str, str]) -> bool:
+    return str(record.get("is_aug", "0")).strip() in ("1", "True", "true")
+
+
 class SeedCandidate(TypedDict, total=False):
     """Intermediate detection result before measurement."""
     bbox: tuple[int, int, int, int]

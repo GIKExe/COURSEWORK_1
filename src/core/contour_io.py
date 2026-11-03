@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 from typing import Any
 
 import numpy as np
 
+from core.io_utils import разобрать_точку, создать_каталог_файла
 from core.models import ContourPayload
 
 
@@ -56,9 +56,7 @@ def save_contour_json(
     if source_name:
         payload["source_name"] = source_name
 
-    out_dir = os.path.dirname(path)
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
+    создать_каталог_файла(path)
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=None)
 
@@ -86,15 +84,7 @@ def parse_raw_points(raw: list[Any]) -> list[tuple[float, float]]:
     if not isinstance(raw, (list, tuple)):
         return result
     for point in raw:
-        try:
-            if isinstance(point, dict):
-                x, y = float(point["x"]), float(point["y"])
-            elif isinstance(point, (list, tuple)) and len(point) >= 2:
-                x, y = float(point[0]), float(point[1])
-            else:
-                continue
-            if math.isfinite(x) and math.isfinite(y):
-                result.append((x, y))
-        except (KeyError, TypeError, ValueError, IndexError):
-            continue
+        pt = разобрать_точку(point)
+        if pt is not None:
+            result.append(pt)
     return result
