@@ -4,6 +4,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .io_utils import parse_float
+
 type ParamDef = tuple[str, str, float, float, float, Any, str]
 type CheckboxDef = tuple[str, str, bool]
 
@@ -66,12 +68,10 @@ def normalize_params(params: dict[str, Any]) -> dict[str, Any]:
 
 def parse_mm_per_px_text(text: str) -> float | None:
     """Parse mm/px from user input. Empty string → None (pixel measurements)."""
-    text = (text or "").strip().replace(",", ".")
-    if not text:
+    if not (text or "").strip():
         return None
-    try:
-        value = float(text)
-    except ValueError:
+    value = parse_float(text)
+    if value is None:
         raise ValueError("Масштаб мм/px должен быть числом, например 0.025") from None
     if not math.isfinite(value) or value <= 0:
         raise ValueError("Масштаб мм/px должен быть положительным числом")

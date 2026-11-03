@@ -6,6 +6,7 @@ import os
 import re
 
 from core.models import DEFAULT_CSV_FIELDS, SKIP_CSV_FIELDS
+from core.io_utils import создать_каталог_файла
 
 
 def read_csv_robust(path: str) -> tuple[list[str], list[dict[str, str]]]:
@@ -38,9 +39,7 @@ def read_csv_robust(path: str) -> tuple[list[str], list[dict[str, str]]]:
 
 def write_csv(path: str, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
     """Write rows to a CSV file with UTF-8 BOM."""
-    out_dir = os.path.dirname(path)
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
+    создать_каталог_файла(path)
     with open(path, "w", newline="", encoding="utf-8-sig") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()

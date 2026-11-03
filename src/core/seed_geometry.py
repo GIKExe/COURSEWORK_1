@@ -12,6 +12,9 @@ from typing import Any, Iterable
 import cv2
 import numpy as np
 
+from .contour_mask import contour_mask
+from .io_utils import разобрать_точку, to_gray
+
 
 def points_to_contour(points: Iterable[Any] | None) -> np.ndarray | None:
     """Convert a heterogeneous point list to an (N, 1, 2) int32 contour."""
@@ -24,16 +27,9 @@ def points_to_contour(points: Iterable[Any] | None) -> np.ndarray | None:
         return None
     pts: list[tuple[int, int]] = []
     for point in points:
-        try:
-            if isinstance(point, dict):
-                x, y = float(point["x"]), float(point["y"])
-            elif isinstance(point, (list, tuple)) and len(point) >= 2:
-                x, y = float(point[0]), float(point[1])
-            else:
-                continue
-        except (KeyError, TypeError, ValueError):
-            continue
-        if math.isfinite(x) and math.isfinite(y):
+        parsed = разобрать_точку(point)
+        if parsed is not None:
+            x, y = parsed
             pts.append((int(round(x)), int(round(y))))
     if len(pts) < 3:
         return None
@@ -187,17 +183,11 @@ def compute_median_rgb(
     if len(pts) < 3:
         return None
 
-    img_h, img_w = arr.shape[:2]
-    x, y, w, h = cv2.boundingRect(pts.reshape(-1, 1, 2))
-    x0, y0 = max(0, int(x)), max(0, int(y))
-    x1, y1 = min(img_w, int(x + w)), min(img_h, int(y + h))
-    if x1 <= x0 or y1 <= y0:
+    region = contour_mask(arr.shape, pts)
+    if region is None:
         return None
-
+    x0, y0, x1, y1, mask = region
     crop = arr[y0:y1, x0:x1]
-    mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
-    shifted = (pts - np.array([x0, y0], dtype=np.int32)).reshape(-1, 1, 2)
-    cv2.drawContours(mask, [shifted], -1, 255, thickness=cv2.FILLED)
 
     valid_pixels = crop[mask > 0]
     if valid_pixels.size == 0 or len(valid_pixels) == 0:
@@ -235,16 +225,11 @@ def rgb_averaged(image_bgr: np.ndarray, contour: np.ndarray | None) -> tuple[flo
     pts = np.asarray(contour, dtype=np.int32).reshape(-1, 2)
     if len(pts) < 3:
         return None
-    x, y, w, h = cv2.boundingRect(pts.reshape(-1, 1, 2))
-    img_h, img_w = image_bgr.shape[:2]
-    x0, y0 = max(0, int(x)), max(0, int(y))
-    x1, y1 = min(img_w, int(x + w)), min(img_h, int(y + h))
-    if x1 <= x0 or y1 <= y0:
+    region = contour_mask(image_bgr.shape, pts)
+    if region is None:
         return None
+    x0, y0, x1, y1, mask = region
     crop = image_bgr[y0:y1, x0:x1]
-    mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
-    shifted = (pts - np.array([x0, y0], dtype=np.int32)).reshape(-1, 1, 2)
-    cv2.drawContours(mask, [shifted], -1, 255, thickness=cv2.FILLED)
     if cv2.countNonZero(mask) == 0:
         return None
     mean = cv2.mean(crop, mask=mask)  # BGR(A) order
@@ -262,20 +247,6 @@ _GROOVE_ZONE = 0.60    # зона анализа: края зерна отсек
                        # трёхмерного затенения и дали бы ложный "гребень"
 _GROOVE_INNER = 0.35   # центральная полоса, в которой ищется минимум профиля
 _GROOVE_OUTER = 0.42   # отсюда берётся уровень соседних участков для сравнения
-
-
-def _gray_from(image: np.ndarray) -> np.ndarray | None:
-    """Привести регион изображения к оттенкам серого uint8."""
-    if image is None:
-        return None
-    if image.ndim == 2:
-        return image.copy()
-    ch = image.shape[2]
-    if ch == 3:
-        return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    if ch == 4:
-        return cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY)
-    return image[:, :, 0].copy()
 
 
 def _axis_angle(mask: np.ndarray, angle_hint: float | None) -> float | None:
@@ -359,18 +330,16 @@ def groove_score(
     x, y, w, h = cv2.boundingRect(pts.reshape(-1, 1, 2))
     if w < 8 or h < 8:
         return None
-    img_h, img_w = image_bgr.shape[:2]
-    pad = 2
-    x0, y0 = max(0, x - pad), max(0, y - pad)
-    x1, y1 = min(img_w, x + w + pad), min(img_h, y + h + pad)
+    region = contour_mask(image_bgr.shape, pts, pad=2, bbox=(x, y, w, h))
+    if region is None:
+        return None
+    x0, y0, x1, y1, mask = region
     if x1 - x0 < 8 or y1 - y0 < 8:
         return None
 
-    gray = _gray_from(image_bgr[y0:y1, x0:x1])
+    gray = to_gray(image_bgr[y0:y1, x0:x1])
     if gray is None:
         return None
-    mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
-    cv2.drawContours(mask, [(pts - np.array([x0, y0])).reshape(-1, 1, 2)], -1, 255, thickness=cv2.FILLED)
     if cv2.countNonZero(mask) < 100:
         return None
 

@@ -11,8 +11,19 @@ from typing import Any, Callable
 from PIL import Image
 
 from core.csv_utils import read_csv_robust
+from core.io_utils import parse_float
+from core.models import is_augmentation
 from gui.common.file_scan import scan_directory
-from gui.common.ruler import draw_canvas_ruler, draw_mm_ruler
+from gui.common.ruler import draw_canvas_ruler
+from gui.common.widgets import (
+    инициализировать_состояние_приложения,
+    создать_блок_навигации,
+    создать_верхнюю_панель,
+    создать_панель_масштаба,
+    создать_панель_модулей,
+    создать_статус_строку,
+    выбрать_папку,
+)
 from gui.common.zoomable import ZoomableCanvas, load_image_async
 
 CONTOUR_COLORS: dict[str, str] = {
@@ -32,12 +43,9 @@ class AugInspectionApp:
         initial_index: int = 0,
         initial_file_index: str | None = None,
     ) -> None:
-        self.root = root
-        self.data_dir = os.path.abspath(data_dir)
-        self._switch = switch_callback
-        self.initial_index = initial_index
-        self.initial_file_index = initial_file_index
-        self.records: list[dict[str, str]] = []
+        инициализировать_состояние_приложения(
+            self, root, data_dir, switch_callback, initial_index, initial_file_index
+        )
         self.filtered_indices: list[int] = []
         self.current_f_idx = 0
         self.image_files: dict[str, str] = {}
@@ -89,7 +97,7 @@ class AugInspectionApp:
         search = self.search_text.get().strip().lower()
         matched: list[int] = []
         for i, r in enumerate(self.records):
-            is_aug = str(r.get("is_aug", "0")).strip() in ("1", "True", "true")
+            is_aug = is_augmentation(r)
             split = r.get("split", "").strip().lower()
             fi = r.get("file_index", "").lower()
             aug_of = r.get("aug_of", "").lower()
@@ -119,15 +127,10 @@ class AugInspectionApp:
         self.root.geometry("1400x880")
         self.root.minsize(1080, 680)
 
-        top = ttk.Frame(self.root, padding=(6, 5))
-        top.pack(side=tk.TOP, fill=tk.X)
+        top = создать_верхнюю_панель(self.root)
 
         # 1. Единый блок переключения модулей
-        mod_frame = ttk.Frame(top)
-        mod_frame.pack(side=tk.LEFT)
-        ttk.Button(mod_frame, text="✂ Сегментация", command=lambda: self._nav("segmentation")).pack(side=tk.LEFT, padx=1)
-        ttk.Button(mod_frame, text="🔍 Инспектор", command=lambda: self._nav("inspection")).pack(side=tk.LEFT, padx=1)
-        ttk.Button(mod_frame, text="🔥 Аугментации", state="disabled").pack(side=tk.LEFT, padx=1)
+        создать_панель_модулей(top, "aug_inspection", self._nav)
 
         ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill="y", padx=8)
 
@@ -137,19 +140,10 @@ class AugInspectionApp:
         ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill="y", padx=6)
 
         # 3. Навигация (единый стиль)
-        self.btn_prev = ttk.Button(top, text="◀ Назад", width=10, command=self.prev_item)
-        self.btn_prev.pack(side=tk.LEFT, padx=2)
-        nav = ttk.Frame(top)
-        nav.pack(side=tk.LEFT, padx=4)
-        ttk.Label(nav, text="Семечка:").pack(side=tk.LEFT)
-        self.pos_var = tk.StringVar(value="0")
-        self.pos_entry = ttk.Entry(nav, textvariable=self.pos_var, width=6, justify="center")
-        self.pos_entry.pack(side=tk.LEFT, padx=4)
-        self.pos_entry.bind("<Return>", self._on_goto_pos)
-        self.total_lbl = ttk.Label(nav, text="из 0")
-        self.total_lbl.pack(side=tk.LEFT)
-        self.btn_next = ttk.Button(top, text="Вперёд ▶", width=10, command=self.next_item)
-        self.btn_next.pack(side=tk.LEFT, padx=2)
+        (self.btn_prev, _, self.pos_var, self.pos_entry,
+         self.total_lbl, self.btn_next) = создать_блок_навигации(
+            top, self.prev_item, self.next_item, self._on_goto_pos
+        )
 
         ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill="y", padx=6)
 
@@ -171,14 +165,7 @@ class AugInspectionApp:
         ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill="y", padx=6)
 
         # 5. Единый блок масштабирования
-        zoom_frame = ttk.Frame(top)
-        zoom_frame.pack(side=tk.LEFT)
-        ttk.Button(zoom_frame, text="+", width=3, command=lambda: self.zoom_widget.zoom_in()).pack(side=tk.LEFT, padx=1)
-        ttk.Button(zoom_frame, text="-", width=3, command=lambda: self.zoom_widget.zoom_out()).pack(side=tk.LEFT, padx=1)
-        ttk.Button(zoom_frame, text="1:1", width=4, command=lambda: self.zoom_widget.zoom_actual()).pack(side=tk.LEFT, padx=1)
-        ttk.Button(zoom_frame, text="По окну", command=lambda: self.zoom_widget.zoom_fit()).pack(side=tk.LEFT, padx=1)
-        self.zoom_lbl = ttk.Label(zoom_frame, text="100%", width=6, anchor="center")
-        self.zoom_lbl.pack(side=tk.LEFT, padx=3)
+        _, self.zoom_lbl, _ = создать_панель_масштаба(top, self)
 
         # 6. Кнопки семьи и оригинала справа
         self.btn_family = ttk.Button(top, text="👨‍👧‍👦 Семья", command=self._filter_family)
@@ -187,7 +174,7 @@ class AugInspectionApp:
         self.btn_orig.pack(side=tk.RIGHT, padx=3)
 
         self.status_var = tk.StringVar(value="Готов к работе")
-        ttk.Label(self.root, textvariable=self.status_var, relief="sunken", anchor="w", padding=(6, 3)).pack(side=tk.BOTTOM, fill=tk.X)
+        создать_статус_строку(self.root, переменная=self.status_var, отступ=(6, 3))
 
         paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
@@ -280,10 +267,24 @@ class AugInspectionApp:
         self.search_text.set("")
         self._apply_filter()
 
-    def _goto_original(self) -> None:
+    def _запись_под_курсором(self) -> dict[str, str] | None:
+        """Вернуть текущую запись отфильтрованного списка.
+
+        Общая часть ``_goto_original`` и ``_filter_family``.
+
+        Параметры: отсутствуют (используется состояние фильтра).
+
+        Возвращает запись ``self.records`` под текущей позицией фильтра
+        либо ``None``, если отфильтрованных записей нет.
+        """
         if not self.filtered_indices:
+            return None
+        return self.records[self.filtered_indices[self.current_f_idx]]
+
+    def _goto_original(self) -> None:
+        r = self._запись_под_курсором()
+        if r is None:
             return
-        r = self.records[self.filtered_indices[self.current_f_idx]]
         target = r.get("aug_of", "").strip() or r.get("file_index", "").strip()
         for f_i, r_idx in enumerate(self.filtered_indices):
             if self.records[r_idx].get("file_index") == target:
@@ -295,16 +296,16 @@ class AugInspectionApp:
         self._apply_filter(preserve_file_index=target)
 
     def _filter_family(self) -> None:
-        if not self.filtered_indices:
+        r = self._запись_под_курсором()
+        if r is None:
             return
-        r = self.records[self.filtered_indices[self.current_f_idx]]
         parent = r.get("aug_of", "").strip() or r.get("file_index", "").strip()
         self.filter_mode.set("Все")
         self.search_text.set(parent)
         self._apply_filter(preserve_file_index=r.get("file_index"))
 
     def _choose_folder(self) -> None:
-        d = filedialog.askdirectory(initialdir=self.data_dir, title="Выберите папку с датасетом")
+        d = выбрать_папку(self.data_dir, "Выберите папку с датасетом")
         if d:
             self._load_dataset(d)
 
@@ -330,7 +331,7 @@ class AugInspectionApp:
         for k, v in self.prop_vars.items():
             v.set(record.get(k, "") or "—")
 
-        is_aug = str(record.get("is_aug", "0")).strip() in ("1", "True", "true")
+        is_aug = is_augmentation(record)
         aug_of = record.get("aug_of", "").strip()
         split = record.get("split", "train").strip()
         self.aug_type_lbl.config(text="🔥 АУГМЕНТАЦИЯ" if is_aug else "⭐ ОРИГИНАЛ")
@@ -437,7 +438,7 @@ class AugInspectionApp:
                                        fill="#FF0055", outline="#FFFFFF", tags=("overlay",))
 
         if self.show_axis_var.get() and self.show_contour_var.get():
-            ang = self._parse_float(self._current_record().get("angle_deg"))
+            ang = parse_float(self._current_record().get("angle_deg"))
             if ang is not None:
                 cx = sum(p[0] for p in pts) / len(pts) * scale
                 cy = sum(p[1] for p in pts) / len(pts) * scale
@@ -453,23 +454,15 @@ class AugInspectionApp:
         # Отрисовка миллиметровой линейки
         if self.show_ruler_var.get():
             rec = self._current_record()
-            mm_per_px = self._parse_float(rec.get("mm_per_px"))
-            length_mm = self._parse_float(rec.get("length_mm"))
-            width_mm = self._parse_float(rec.get("width_mm"))
+            mm_per_px = parse_float(rec.get("mm_per_px"))
+            length_mm = parse_float(rec.get("length_mm"))
+            width_mm = parse_float(rec.get("width_mm"))
             if not length_mm and rec.get("length_px") and mm_per_px:
-                length_mm = (self._parse_float(rec.get("length_px")) or 0.0) * mm_per_px
+                length_mm = (parse_float(rec.get("length_px")) or 0.0) * mm_per_px
             if not width_mm and rec.get("width_px") and mm_per_px:
-                width_mm = (self._parse_float(rec.get("width_px")) or 0.0) * mm_per_px
+                width_mm = (parse_float(rec.get("width_px")) or 0.0) * mm_per_px
             if mm_per_px and mm_per_px > 0:
                 draw_canvas_ruler(
                     canvas, mm_per_px, scale, length_mm, width_mm,
                     canvas_h=img.size[1], tag="overlay", color="#FF3333"
                 )
-
-    @staticmethod
-    def _parse_float(value: Any) -> float | None:
-        try:
-            f = float(str(value).replace(",", ".").strip())
-        except (TypeError, ValueError):
-            return None
-        return f if math.isfinite(f) else None

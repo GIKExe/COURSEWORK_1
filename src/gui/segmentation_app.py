@@ -18,7 +18,13 @@ from core.params import (
     get_param_definitions, normalize_params, parse_mm_per_px_text, round_param_value,
 )
 from core.segmentation import process_image
-from gui.common.widgets import ToolTip
+from gui.common.widgets import (
+    ToolTip,
+    создать_верхнюю_панель,
+    создать_панель_масштаба,
+    создать_панель_модулей,
+    создать_статус_строку,
+)
 from gui.common.zoomable import ZoomableCanvas
 
 TOOLTIPS: dict[str, str] = {
@@ -96,18 +102,10 @@ class SegmentationApp:
         self.root.minsize(1050, 650)
 
         # ── Верхний тулбар ──
-        toolbar = ttk.Frame(self.root, padding=(6, 5))
-        toolbar.pack(side=tk.TOP, fill=tk.X)
+        toolbar = создать_верхнюю_панель(self.root)
 
         # 1. Единый блок переключения модулей
-        mod_frame = ttk.Frame(toolbar)
-        mod_frame.pack(side=tk.LEFT)
-        btn_seg = ttk.Button(mod_frame, text="✂ Сегментация", state="disabled")
-        btn_seg.pack(side=tk.LEFT, padx=1)
-        btn_ins = ttk.Button(mod_frame, text="🔍 Инспектор", command=lambda: self._nav("inspection"))
-        btn_ins.pack(side=tk.LEFT, padx=1)
-        btn_aug = ttk.Button(mod_frame, text="🔥 Аугментации", command=lambda: self._nav("aug_inspection"))
-        btn_aug.pack(side=tk.LEFT, padx=1)
+        создать_панель_модулей(toolbar, "segmentation", self._nav)
 
         ttk.Separator(toolbar, orient="vertical").pack(side=tk.LEFT, fill="y", padx=8)
 
@@ -130,19 +128,10 @@ class SegmentationApp:
         ttk.Separator(toolbar, orient="vertical").pack(side=tk.LEFT, fill="y", padx=8)
 
         # 3. Единый блок масштабирования
-        zoom_frame = ttk.Frame(toolbar)
-        zoom_frame.pack(side=tk.LEFT)
-        ttk.Button(zoom_frame, text="+", width=3, command=lambda: self.zoom_widget.zoom_in()).pack(side=tk.LEFT, padx=1)
-        ttk.Button(zoom_frame, text="-", width=3, command=lambda: self.zoom_widget.zoom_out()).pack(side=tk.LEFT, padx=1)
-        ttk.Button(zoom_frame, text="1:1", width=4, command=lambda: self.zoom_widget.zoom_actual()).pack(side=tk.LEFT, padx=1)
-        ttk.Button(zoom_frame, text="По окну", command=lambda: self.zoom_widget.zoom_fit()).pack(side=tk.LEFT, padx=1)
-        self.zoom_label = ttk.Label(zoom_frame, text="100%", width=6, anchor="center")
-        self.zoom_label.pack(side=tk.LEFT, padx=3)
+        _, self.zoom_label, _ = создать_панель_масштаба(toolbar, self)
 
         # ── Строка состояния снизу ──
-        ttk.Label(
-            self.root, textvariable=self.status_var, anchor="w", padding=(8, 4), relief="sunken"
-        ).pack(fill=tk.X, side=tk.BOTTOM)
+        создать_статус_строку(self.root, переменная=self.status_var, отступ=(8, 4))
 
         # ── Основная область: слева параметры, справа холст ──
         main = ttk.Frame(self.root, padding=5)

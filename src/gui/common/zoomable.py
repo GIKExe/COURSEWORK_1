@@ -26,6 +26,30 @@ MAX_FALLBACK_H = 800
 SOURCE_CACHE_MAX_BYTES = 256 * 1024 * 1024  # ~256 MB of decoded RGB images
 
 
+def дельта_прокрутки_колесом(event: tk.Event) -> int:
+    """Вычислить шаг прокрутки по событию колеса мыши.
+
+    Общая реализация, заменяющая дубликаты вычисления ``delta``
+    в ``gui.common.zoomable.ZoomableCanvas._on_scroll`` и
+    ``gui.inspection_app.InspectionApp._on_batch_wheel``.
+
+    Параметры:
+        event — событие Tk (``MouseWheel`` либо ``Button-4``/``Button-5``).
+
+    Возвращает ``-1`` — прокрутка вверх, ``1`` — вниз, ``0`` — событие
+    колеса не содержит сдвига (вызывающий код в этом случае ничего
+    не прокручивает).
+    """
+    delta = 0
+    if getattr(event, "delta", 0):
+        delta = -1 if event.delta > 0 else 1
+    elif getattr(event, "num", None) == 4:
+        delta = -1
+    elif getattr(event, "num", None) == 5:
+        delta = 1
+    return delta
+
+
 class _SourceCache:
     """Small thread-safe LRU cache for decoded source images."""
 
@@ -347,13 +371,7 @@ class ZoomableCanvas:
     def _on_scroll(self, event: tk.Event) -> None:
         if getattr(event, "state", 0) & 0x0004:
             return
-        delta = 0
-        if getattr(event, "delta", 0) != 0:
-            delta = -1 if event.delta > 0 else 1
-        elif getattr(event, "num", None) == 4:
-            delta = -1
-        elif getattr(event, "num", None) == 5:
-            delta = 1
+        delta = дельта_прокрутки_колесом(event)
         if delta == 0:
             return
         if getattr(event, "state", 0) & 0x0001:

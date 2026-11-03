@@ -6,12 +6,13 @@ import math
 import cv2
 import numpy as np
 
-from core.segmentation import to_gray_uint8
+from core.io_utils import to_gray
+from core.segmentation import otsu_binarize
 
 
 def calibrate_ruler(image: np.ndarray, debug: bool = False) -> float:
     """Return mm/pixel from a ruler image (BGR, BGRA, or grayscale)."""
-    gray = to_gray_uint8(image)
+    gray = to_gray(image, normalize=True)
     crop, mask = _preprocess_ruler(gray)
     tick_bin, ticks, heights = _detect_ticks(crop, mask)
     x_pos = np.array([t["cx"] for t in ticks], dtype=np.float64)
@@ -53,7 +54,7 @@ def format_calibration_message(mm_per_px: float) -> str:
 def _preprocess_ruler(gray: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     H, W = gray.shape
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    binary = otsu_binarize(blurred)
     binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7)), iterations=3)
     binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7)), iterations=2)
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)

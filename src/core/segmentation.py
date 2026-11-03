@@ -1,53 +1,29 @@
 """Image segmentation pipeline: mask creation, filtering, edge estimation."""
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import cv2
 import numpy as np
 
+from core.contour_mask import contour_mask
+from core.io_utils import to_gray, to_uint8 as _to_uint8
 from core.models import ProcessResult, SeedItem, SeedStatus, STATUS_COLORS
 from core.params import ensure_odd
 from core.seed_geometry import compute_seed_metrics
 
 
-def to_uint8(img: np.ndarray) -> np.ndarray:
-    if img.dtype == np.uint8:
-        return img
-    dst = np.empty_like(img)
-    cv2.normalize(img, dst, 0, 255, cv2.NORM_MINMAX)
-    return dst.astype(np.uint8)
-
-
-def to_gray_uint8(image: np.ndarray | None) -> np.ndarray:
-    """Convert BGR/BGRA/gray image to grayscale uint8."""
-    if image is None:
-        raise ValueError("Изображение не передано")
-    if image.ndim == 3:
-        ch = image.shape[2]
-        if ch == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        elif ch == 4:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY)
-        else:
-            gray = image[:, :, 0].copy()
-    else:
-        gray = image.copy()
-    return to_uint8(gray)
-
-
-def _morph(mask: np.ndarray, kernel_size: int, op: int, iterations: int = 1) -> np.ndarray:
-    if kernel_size <= 1:
-        return mask
-    kern = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
-    return cv2.morphologyEx(mask, op, kern, iterations=iterations)
+def otsu_binarize(image: np.ndarray) -> np.ndarray:
+    _, mask = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return mask
 
 
 def make_mask(gray: np.ndarray, params: dict[str, Any]) -> np.ndarray:
     """Create a binary seed mask using Otsu thresholding + morphology."""
     k = ensure_odd(params["blur_kernel"], 1)
     blurred = cv2.GaussianBlur(gray, (k, k), 0)
-    _, mask = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    mask = otsu_binarize(blurred)
 
     white_count = int(np.count_nonzero(mask))
     if 0 < white_count < mask.size:
@@ -88,16 +64,12 @@ def fill_external_contours(mask: np.ndarray, min_area: int) -> np.ndarray:
 
 def object_contrast(gray: np.ndarray, contour: np.ndarray, bbox: tuple[int, int, int, int]) -> float:
     x, y, w, h = bbox
-    img_h, img_w = gray.shape[:2]
     pad = max(6, min(20, int(min(w, h) * 0.25)))
-    x0, y0 = max(0, x - pad), max(0, y - pad)
-    x1, y1 = min(img_w, x + w + pad), min(img_h, y + h + pad)
-    if x1 <= x0 or y1 <= y0:
+    region = contour_mask(gray.shape, contour, pad=pad, bbox=bbox)
+    if region is None:
         return 0.0
+    x0, y0, x1, y1, m = region
     roi = gray[y0:y1, x0:x1]
-    m = np.zeros(roi.shape, dtype=np.uint8)
-    shifted = contour - np.array([x0, y0], dtype=np.int32)
-    cv2.drawContours(m, [shifted.astype(np.int32)], -1, 255, thickness=cv2.FILLED)
     if cv2.countNonZero(m) == 0:
         return 0.0
     kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -256,7 +228,7 @@ def sort_items_reading_order(items: list[SeedItem], row_height_ratio: float = 0.
 
 def process_image(img_bgr: np.ndarray, params: dict[str, Any]) -> ProcessResult:
     """Full segmentation pipeline: mask → contours → filter → measure → annotate."""
-    gray = to_gray_uint8(img_bgr)
+    gray = to_gray(img_bgr, normalize=True)
     gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
     mask = make_mask(gray, params)
 

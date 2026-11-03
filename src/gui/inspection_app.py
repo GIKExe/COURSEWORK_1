@@ -11,14 +11,23 @@ from typing import Any, Callable
 from PIL import Image, ImageDraw, ImageTk
 
 from core.contour_io import parse_raw_points
-from core.csv_utils import read_csv_robust, write_csv
+from core.csv_utils import merge_fieldnames, read_csv_robust, write_csv
 import re
-from core.io_utils import fmt_float
-from core.models import AUG_EXTRA_FIELDS, DEFAULT_CSV_FIELDS, EXTRA_EDITABLE_FIELDS, IMAGE_EXTENSIONS, SKIP_CSV_FIELDS
+from core.io_utils import fmt_float, parse_float
+from core.models import AUG_EXTRA_FIELDS, DEFAULT_CSV_FIELDS, EXTRA_EDITABLE_FIELDS, IMAGE_EXTENSIONS, SKIP_CSV_FIELDS, is_augmentation
 from core.seed_geometry import compute_median_color_hex
 from gui.common.file_scan import scan_directory
-from gui.common.ruler import draw_canvas_ruler, draw_mm_ruler
-from gui.common.zoomable import ZoomableCanvas, load_image_async, RESAMPLE
+from gui.common.ruler import draw_canvas_ruler
+from gui.common.widgets import (
+    инициализировать_состояние_приложения,
+    создать_блок_навигации,
+    создать_верхнюю_панель,
+    создать_панель_масштаба,
+    создать_панель_модулей,
+    создать_статус_строку,
+    выбрать_папку,
+)
+from gui.common.zoomable import ZoomableCanvas, дельта_прокрутки_колесом, load_image_async, RESAMPLE
 
 POINT_HANDLE_RADIUS = 5
 POINT_HIT_RADIUS = 9
@@ -42,20 +51,6 @@ MODE_WITHOUT_GROOVE = "without groove"  # пакетный режим (сетк�
 MODE_OPTIONS = (MODE_NORMAL, MODE_WITH_GROOVE, MODE_WITHOUT_GROOVE)
 
 
-def parse_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    text = str(value).strip().replace(",", ".")
-    if not text:
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return None
-
-
 def format_number(value: float | None) -> str:
     if value is None:
         return ""
@@ -73,12 +68,9 @@ class InspectionApp:
         initial_index: int = 0,
         initial_file_index: str | None = None,
     ) -> None:
-        self.root = root
-        self.data_dir = os.path.abspath(data_dir)
-        self._switch = switch_callback
-        self.initial_index = initial_index
-        self.initial_file_index = initial_file_index
-        self.records: list[dict[str, str]] = []
+        инициализировать_состояние_приложения(
+            self, root, data_dir, switch_callback, initial_index, initial_file_index
+        )
         self.aug_records: list[dict[str, str]] = []
         self.fieldnames: list[str] = []
         self.current = initial_index
@@ -184,7 +176,7 @@ class InspectionApp:
         позиции строк в файле и в self.records совпадали.
         """
         return (
-            str(row.get("is_aug", "0") or "0").strip() in ("1", "True", "true")
+            is_augmentation(row)
             or bool(str(row.get("aug_of") or "").strip())
             or bool(re.search(r"_aug\d+$", str(file_index or "").strip()))
         )
@@ -194,18 +186,12 @@ class InspectionApp:
         self.root.geometry("1360x840")
         self.root.minsize(1050, 650)
 
-        self.statusbar = ttk.Label(self.root, text="Загрузка...", anchor="w", padding=(8, 3), relief="sunken")
-        self.statusbar.pack(side=tk.BOTTOM, fill=tk.X)
+        self.statusbar = создать_статус_строку(self.root, текст="Загрузка...", отступ=(8, 3))
 
-        top = ttk.Frame(self.root, padding=(6, 5))
-        top.pack(side=tk.TOP, fill=tk.X)
+        top = создать_верхнюю_панель(self.root)
 
         # 1. Единый блок переключения модулей
-        mod_frame = ttk.Frame(top)
-        mod_frame.pack(side=tk.LEFT)
-        ttk.Button(mod_frame, text="✂ Сегментация", command=lambda: self._nav("segmentation")).pack(side=tk.LEFT, padx=1)
-        ttk.Button(mod_frame, text="🔍 Инспектор", state="disabled").pack(side=tk.LEFT, padx=1)
-        ttk.Button(mod_frame, text="🔥 Аугментации", command=lambda: self._nav("aug_inspection")).pack(side=tk.LEFT, padx=1)
+        создать_панель_модулей(top, "inspection", self._nav)
 
         ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill="y", padx=8)
 
@@ -227,36 +213,19 @@ class InspectionApp:
         ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill="y", padx=6)
 
         # 3. Навигация по семенам (единый стиль)
-        self.btn_prev = ttk.Button(top, text="◀ Назад", width=10, command=self.prev_seed)
-        self.btn_prev.pack(side=tk.LEFT, padx=2)
-        nav = ttk.Frame(top)
-        nav.pack(side=tk.LEFT, padx=4)
-        self.pos_lbl = ttk.Label(nav, text="Семечка:")
-        self.pos_lbl.pack(side=tk.LEFT)
-        self.pos_var = tk.StringVar(value="0")
-        self.pos_entry = ttk.Entry(nav, textvariable=self.pos_var, width=6, justify="center")
-        self.pos_entry.pack(side=tk.LEFT, padx=4)
-        self.pos_entry.bind("<Return>", self._on_goto)
-        self.total_lbl = ttk.Label(nav, text="из 0")
-        self.total_lbl.pack(side=tk.LEFT)
-        self.btn_next = ttk.Button(top, text="Вперёд ▶", width=10, command=self.next_seed)
-        self.btn_next.pack(side=tk.LEFT, padx=2)
+        (self.btn_prev, self.pos_lbl, self.pos_var, self.pos_entry,
+         self.total_lbl, self.btn_next) = создать_блок_навигации(
+            top, self.prev_seed, self.next_seed, self._on_goto
+        )
 
         ttk.Separator(top, orient="vertical").pack(side=tk.LEFT, fill="y", padx=6)
 
         # 4. Единый блок масштабирования
-        zoom_frame = ttk.Frame(top)
-        zoom_frame.pack(side=tk.LEFT)
-        self.btn_zoom_in = ttk.Button(zoom_frame, text="+", width=3, command=lambda: self.zoom_widget.zoom_in())
-        self.btn_zoom_in.pack(side=tk.LEFT, padx=1)
-        self.btn_zoom_out = ttk.Button(zoom_frame, text="-", width=3, command=lambda: self.zoom_widget.zoom_out())
-        self.btn_zoom_out.pack(side=tk.LEFT, padx=1)
-        self.btn_zoom_actual = ttk.Button(zoom_frame, text="1:1", width=4, command=lambda: self.zoom_widget.zoom_actual())
-        self.btn_zoom_actual.pack(side=tk.LEFT, padx=1)
-        self.btn_zoom_fit = ttk.Button(zoom_frame, text="По окну", command=lambda: self.zoom_widget.zoom_fit())
-        self.btn_zoom_fit.pack(side=tk.LEFT, padx=1)
-        self.zoom_lbl = ttk.Label(zoom_frame, text="100%", width=6, anchor="center")
-        self.zoom_lbl.pack(side=tk.LEFT, padx=3)
+        _, self.zoom_lbl, zoom_btns = создать_панель_масштаба(top, self)
+        self.btn_zoom_in = zoom_btns["zoom_in"]
+        self.btn_zoom_out = zoom_btns["zoom_out"]
+        self.btn_zoom_actual = zoom_btns["zoom_actual"]
+        self.btn_zoom_fit = zoom_btns["zoom_fit"]
 
         # 5. Кнопки сохранения справа
         self.btn_save_contour = ttk.Button(top, text="Сохранить контур", command=lambda: self._save_contour(show_message=True))
@@ -353,7 +322,7 @@ class InspectionApp:
             self._switch(target, self.data_dir, self.current, cur_fi)
 
     def _choose_folder(self) -> None:
-        d = filedialog.askdirectory(initialdir=self.data_dir, title="Выберите папку с семенами (out)")
+        d = выбрать_папку(self.data_dir, "Выберите папку с семенами (out)")
         if d:
             self.data_dir = os.path.abspath(d)
             self._load_data()
@@ -364,21 +333,38 @@ class InspectionApp:
         form = ttk.Frame(parent)
         form.pack(fill=tk.BOTH, expand=True)
 
-        def add_readonly(text: str, r: int) -> tk.StringVar:
+        def add_field(text: str, r: int, readonly: bool = False) -> tk.StringVar:
+            """Добавить строку формы «подпись + поле ввода» и вернуть переменную.
+
+            Общая реализация, заменяющая дубликаты ``add_readonly`` и
+            ``add_entry`` (тела различались только состоянием поля
+            и привязкой обработчиков).
+
+            Параметры:
+                text — подпись поля (левая колонка сетки формы);
+                r — номер строки сетки формы;
+                readonly — ``True``: поле в состоянии ``readonly`` без
+                    обработчиков правки; ``False``: редактируемое поле,
+                    его изменения помечают запись изменённой.
+
+            Возвращает ``tk.StringVar``, связанный с созданным полем.
+            """
             ttk.Label(form, text=text).grid(row=r, column=0, sticky="w", padx=(0, 10), pady=3)
             var = tk.StringVar()
-            entry = ttk.Entry(form, textvariable=var, state="readonly", width=20)
+            entry = ttk.Entry(form, textvariable=var, width=20, **({"state": "readonly"} if readonly else {}))
             entry.grid(row=r, column=1, sticky="ew", pady=3)
+            if not readonly:
+                entry.bind("<KeyRelease>", self._mark_dirty_and_render)
+                entry.bind("<FocusOut>", self._mark_dirty_and_render)
             return var
 
+        def add_readonly(text: str, r: int) -> tk.StringVar:
+            """Создать только для чтения поле формы (см. ``add_field``)."""
+            return add_field(text, r, readonly=True)
+
         def add_entry(text: str, r: int) -> tk.StringVar:
-            ttk.Label(form, text=text).grid(row=r, column=0, sticky="w", padx=(0, 10), pady=3)
-            var = tk.StringVar()
-            entry = ttk.Entry(form, textvariable=var, width=20)
-            entry.grid(row=r, column=1, sticky="ew", pady=3)
-            entry.bind("<KeyRelease>", self._mark_dirty_and_render)
-            entry.bind("<FocusOut>", self._mark_dirty_and_render)
-            return var
+            """Создать редактируемое поле формы (см. ``add_field``)."""
+            return add_field(text, r)
 
         row = 0
         self.file_index_var = add_readonly("Файл (file_index):", row); row += 1
@@ -811,13 +797,7 @@ class InspectionApp:
 
     def _on_batch_wheel(self, event: tk.Event) -> None:
         """Прокрутка сетки колесом мыши (с Shift — по горизонтали)."""
-        delta = 0
-        if getattr(event, "delta", 0):
-            delta = -1 if event.delta > 0 else 1
-        elif getattr(event, "num", None) == 4:
-            delta = -1
-        elif getattr(event, "num", None) == 5:
-            delta = 1
+        delta = дельта_прокрутки_колесом(event)
         if delta == 0:
             return
         if getattr(event, "state", 0) & 0x0001:
@@ -1385,17 +1365,33 @@ class InspectionApp:
             self.unsaved = True
         return True
 
-    def save(self) -> bool:
-        # В пакетном режиме «Сохранить» пишет только изменённые значения
-        # has_groove — остальные столбцы и строки файла не затрагиваются.
-        if self.batch_mode:
-            return self._save_batch_grooves()
+    def _подготовить_сохранение(self) -> bool:
+        """Сохранить правки перед записью CSV; ``False`` — записывать нельзя.
+
+        Общая часть методов ``save`` и ``save_as``: сначала фиксируются
+        правки полей и контура, затем проверяется наличие записей.
+
+        Параметры: отсутствуют (используется состояние приложения).
+
+        Возвращает ``True``, если можно продолжать запись CSV, и ``False``,
+        если пользователь отменил сохранение правок либо записей нет
+        (во втором случае показывается предупреждение).
+        """
         if self.dirty and not self._save_current(strict=True):
             return False
         if self.contour_dirty:
             self._save_contour(show_message=False)
         if not self.records:
             messagebox.showwarning("Сохранение", "Нет записей для сохранения.")
+            return False
+        return True
+
+    def save(self) -> bool:
+        # В пакетном режиме «Сохранить» пишет только изменённые значения
+        # has_groove — остальные столбцы и строки файла не затрагиваются.
+        if self.batch_mode:
+            return self._save_batch_grooves()
+        if not self._подготовить_сохранение():
             return False
         if not self.output_path:
             self.output_path = os.path.join(self.data_dir, "seeds.csv")
@@ -1453,12 +1449,7 @@ class InspectionApp:
         return True
 
     def save_as(self) -> bool:
-        if self.dirty and not self._save_current(strict=True):
-            return False
-        if self.contour_dirty:
-            self._save_contour(show_message=False)
-        if not self.records:
-            messagebox.showwarning("Сохранение", "Нет записей для сохранения.")
+        if not self._подготовить_сохранение():
             return False
         initial = os.path.basename(self.output_path) if self.output_path else "seeds.csv"
         path = filedialog.asksaveasfilename(
@@ -1472,21 +1463,18 @@ class InspectionApp:
         return self._write_csv(path)
 
     def _get_fieldnames(self) -> list[str]:
-        names: list[str] = []
-        for name in ALL_COLUMNS:
-            if name not in SKIP_CSV_FIELDS and name not in names:
-                names.append(name)
-        for name in self.fieldnames:
-            if name not in SKIP_CSV_FIELDS and name not in names:
-                names.append(name)
+        """Собрать список колонок CSV: базовые + сохранённые + поля записей.
+
+        Порядок колонок совпадает с прежним ручным сбором: сначала
+        ``ALL_COLUMNS``, затем сохранённые ``fieldnames``, затем
+        ``AUG_EXTRA_FIELDS`` (только если есть аугментации), затем ключи
+        записей; в конце отбрасываются служебные поля и пары
+        «length_mm»/«width_mm».
+        """
+        existing = list(self.fieldnames)
         if getattr(self, "aug_records", None):
-            for name in AUG_EXTRA_FIELDS:
-                if name not in SKIP_CSV_FIELDS and name not in names:
-                    names.append(name)
-        for record in self.records:
-            for key in record:
-                if key not in SKIP_CSV_FIELDS and key not in names:
-                    names.append(key)
+            existing = existing + AUG_EXTRA_FIELDS
+        names = merge_fieldnames(existing, list(self.records), base_fields=ALL_COLUMNS)
         return [n for n in names if n not in SKIP_CSV_FIELDS and n not in ("length_mm", "width_mm")]
 
     def _write_csv(self, path: str, show_message: bool = True) -> bool:
