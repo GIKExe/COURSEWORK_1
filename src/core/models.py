@@ -1,4 +1,3 @@
-"""Type definitions and constants shared across the pipeline."""
 from __future__ import annotations
 
 from enum import Enum

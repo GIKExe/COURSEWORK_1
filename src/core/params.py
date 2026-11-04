@@ -1,4 +1,3 @@
-"""Parameter definitions, defaults, normalization, and formatting."""
 from __future__ import annotations
 
 import math

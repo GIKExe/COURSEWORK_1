@@ -1,4 +1,3 @@
-"""Инспектор семечек: просмотр и правка параметров и контуров."""
 from __future__ import annotations
 
 import json
@@ -58,8 +57,6 @@ def format_number(value: float | None) -> str:
 
 
 class InspectionApp:
-    """Просмотр и редактирование параметров семечек и их контуров."""
-
     def __init__(
         self,
         root: tk.Tk,
@@ -170,11 +167,6 @@ class InspectionApp:
 
     @staticmethod
     def _is_aug_row(file_index: str, row: dict[str, str]) -> bool:
-        """Определить, относится ли строка CSV к аугментированной записи.
-
-        Используется и при загрузке, и при пакетном сохранении, чтобы
-        позиции строк в файле и в self.records совпадали.
-        """
         return (
             is_augmentation(row)
             or bool(str(row.get("aug_of") or "").strip())
@@ -334,21 +326,6 @@ class InspectionApp:
         form.pack(fill=tk.BOTH, expand=True)
 
         def add_field(text: str, r: int, readonly: bool = False) -> tk.StringVar:
-            """Добавить строку формы «подпись + поле ввода» и вернуть переменную.
-
-            Общая реализация, заменяющая дубликаты ``add_readonly`` и
-            ``add_entry`` (тела различались только состоянием поля
-            и привязкой обработчиков).
-
-            Параметры:
-                text — подпись поля (левая колонка сетки формы);
-                r — номер строки сетки формы;
-                readonly — ``True``: поле в состоянии ``readonly`` без
-                    обработчиков правки; ``False``: редактируемое поле,
-                    его изменения помечают запись изменённой.
-
-            Возвращает ``tk.StringVar``, связанный с созданным полем.
-            """
             ttk.Label(form, text=text).grid(row=r, column=0, sticky="w", padx=(0, 10), pady=3)
             var = tk.StringVar()
             entry = ttk.Entry(form, textvariable=var, width=20, **({"state": "readonly"} if readonly else {}))
@@ -569,12 +546,6 @@ class InspectionApp:
         return str(self.records[gi].get("has_groove", "")).strip() != original
 
     def _on_mode_change(self, event: tk.Event | None = None) -> None:
-        """Реакция на выбор режима в выпадающем списке.
-
-        Оба варианта «with groove» / «without groove» включают один и тот же
-        пакетный вид (сетка 8×4); выбранное название запоминается для
-        статус-строки. Любой другой вариант возвращает одиночный вид.
-        """
         mode = self.mode_var.get()
         if mode in (MODE_WITH_GROOVE, MODE_WITHOUT_GROOVE):
             self._enter_batch_mode(mode)
@@ -683,12 +654,6 @@ class InspectionApp:
         return img
 
     def _render_batch_page(self) -> None:
-        """Отрисовать текущую пачку в сетке 8×4.
-
-        Изображения выводятся строго в исходном пиксельном размере
-        (никаких resize/zoom), поверх них — только рамка и чекбокс:
-        контуры, точки и линейка в этом режиме не рисуются.
-        """
         canvas = self.batch_canvas
         canvas.delete("all")
         self._batch_photos.clear()
@@ -1046,13 +1011,6 @@ class InspectionApp:
         return img
 
     def _render_image(self) -> None:
-        """Перерисовать наложения после зума/сдвига/правки без повторного декодирования.
-
-        Полный пересбор и преобразование в PhotoImage выполняются только при
-        реальном изменении геометрии (изменение размера окна, кнопки зума);
-        обычные правки, например ввод длины или мм/пиксель, лишь заново
-        рисуют дешёвый слой наложения.
-        """
         if self.zoom_widget.image is not None:
             cw, ch = self.zoom_widget.canvas.winfo_width(), self.zoom_widget.canvas.winfo_height()
             if (cw, ch) != self._last_render_size:
@@ -1196,13 +1154,6 @@ class InspectionApp:
         return math.hypot(wx - t * vx, wy - t * vy)
 
     def _insertion_index(self, pt: tuple[float, float]) -> int:
-        """Позиция, в которую нужно вставить новую точку, чтобы она соединилась
-        с двумя ближайшими соседями вдоль контура (концами ближайшего
-        существующего отрезка), а не с первыми/последними точками списка.
-
-        При менее чем 2 точках отрезка для присоединения нет, поэтому точка
-        просто добавляется в конец.
-        """
         pts = self.contour_points
         n = len(pts)
         if n < 2:
@@ -1398,12 +1349,6 @@ class InspectionApp:
         return self._write_csv(self.output_path)
 
     def _save_batch_grooves(self) -> bool:
-        """Записать в seeds.csv только изменённые значения has_groove.
-
-        Файл перечитывается целиком, но изменяется исключительно столбец
-        has_groove у записей, поправленных пользователем: остальные строки
-        и столбцы сохраняются ровно как были.
-        """
         if not self.output_path:
             self.output_path = os.path.join(self.data_dir, "seeds.csv")
         changed = [gi for gi in self._batch_original if self._batch_is_modified(gi)]
@@ -1463,14 +1408,6 @@ class InspectionApp:
         return self._write_csv(path)
 
     def _get_fieldnames(self) -> list[str]:
-        """Собрать список колонок CSV: базовые + сохранённые + поля записей.
-
-        Порядок колонок совпадает с прежним ручным сбором: сначала
-        ``ALL_COLUMNS``, затем сохранённые ``fieldnames``, затем
-        ``AUG_EXTRA_FIELDS`` (только если есть аугментации), затем ключи
-        записей; в конце отбрасываются служебные поля и пары
-        «length_mm»/«width_mm».
-        """
         existing = list(self.fieldnames)
         if getattr(self, "aug_records", None):
             existing = existing + AUG_EXTRA_FIELDS

@@ -1,4 +1,3 @@
-"""Contour JSON I/O and point manipulation."""
 from __future__ import annotations
 
 import json

@@ -1,4 +1,3 @@
-"""Ruler calibration: detect mm/pixel from a ruler photograph."""
 from __future__ import annotations
 
 import math

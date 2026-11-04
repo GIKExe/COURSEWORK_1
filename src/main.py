@@ -1,4 +1,3 @@
-"""Entry point: GUI mode (segmentation / inspection / aug inspection) or batch mode."""
 from __future__ import annotations
 
 import gc
@@ -28,7 +27,6 @@ def _setup_tk_defaults(root: tk.Tk) -> None:
 
 
 def run_gui(initial_screen: str = "segmentation") -> None:
-    """Run the GUI loop, allowing screen switching via callbacks."""
     screen: str | None = initial_screen
     current_out_dir: str = DEFAULT_OUT_DIR
     current_seed_index: int = 0
@@ -69,16 +67,7 @@ def run_gui(initial_screen: str = "segmentation") -> None:
                 current_out_dir = app.data_dir
             elif hasattr(app, "out_dir") and getattr(app, "out_dir", None):
                 current_out_dir = app.out_dir
-        # Окно уничтожено — освобождаем объекты прежнего экрана прямо здесь,
-        # в главном потоке. tkinter-переменные (StringVar и др.) при
-        # финализации вызывают Tcl-команды, а из фонового потока _tkinter
-        # ждёт, пока главный поток войдёт в mainloop, и кидает
-        # «RuntimeError: main thread is not in main loop». Фоновым потоком
-        # у нас является декодер картинок (image-decode): пока он «долбит»
-        # мусор от прошлого экрана, загрузка изображения нового экрана
-        # виснет на секунды — контур на холсте уже нарисован, а картинки
-        # нет. Собираем мусор сразу же, в главном потоке и вне mainloop:
-        # там этот вызов безопасен (та же нить, интерпрейс ещё жив).
+
         app = None
         root = None
         gc.collect()

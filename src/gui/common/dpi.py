@@ -1,4 +1,3 @@
-"""DPI awareness setup for sharp rendering on Windows."""
 from __future__ import annotations
 
 import os

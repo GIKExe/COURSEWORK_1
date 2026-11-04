@@ -1,4 +1,3 @@
-"""Image segmentation pipeline: mask creation, filtering, edge estimation."""
 from __future__ import annotations
 
 import warnings

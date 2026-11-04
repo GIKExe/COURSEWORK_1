@@ -1,4 +1,3 @@
-"""Millimetre ruler drawing on Tkinter canvases."""
 from __future__ import annotations
 
 import math

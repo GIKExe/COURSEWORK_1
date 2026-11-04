@@ -1,4 +1,3 @@
-"""Segmentation GUI: parameter tuning, processing, calibration, export."""
 from __future__ import annotations
 
 import os
@@ -52,8 +51,6 @@ TOOLTIPS: dict[str, str] = {
 
 
 class SegmentationApp:
-    """Main segmentation GUI with parameter tuning and export."""
-
     def __init__(
         self,
         root: tk.Tk,

@@ -1,4 +1,3 @@
-"""Image I/O with Unicode path support and filename sanitization."""
 from __future__ import annotations
 
 import math

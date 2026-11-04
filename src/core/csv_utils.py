@@ -1,4 +1,3 @@
-"""Robust CSV reading and writing with encoding auto-detection."""
 from __future__ import annotations
 
 import csv
@@ -10,10 +9,6 @@ from core.io_utils import создать_каталог_файла
 
 
 def read_csv_robust(path: str) -> tuple[list[str], list[dict[str, str]]]:
-    """Read a CSV file, auto-detecting encoding and delimiter.
-
-    Returns (fieldnames, rows).
-    """
     encodings = ("utf-8-sig", "utf-8", "cp1251", "latin-1")
     last_error: Exception | None = None
     for encoding in encodings:

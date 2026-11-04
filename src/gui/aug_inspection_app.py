@@ -1,4 +1,3 @@
-"""Augmented dataset inspection GUI."""
 from __future__ import annotations
 
 import json
@@ -268,15 +267,6 @@ class AugInspectionApp:
         self._apply_filter()
 
     def _запись_под_курсором(self) -> dict[str, str] | None:
-        """Вернуть текущую запись отфильтрованного списка.
-
-        Общая часть ``_goto_original`` и ``_filter_family``.
-
-        Параметры: отсутствуют (используется состояние фильтра).
-
-        Возвращает запись ``self.records`` под текущей позицией фильтра
-        либо ``None``, если отфильтрованных записей нет.
-        """
         if not self.filtered_indices:
             return None
         return self.records[self.filtered_indices[self.current_f_idx]]
@@ -310,12 +300,6 @@ class AugInspectionApp:
             self._load_dataset(d)
 
     def _update_view(self) -> None:
-        """Refresh info panel + contour and kick off async image loading.
-
-        Everything here is O(record) bookkeeping only; the expensive JPEG
-        decode happens off the UI thread via load_image_async(), so pressing
-        Next/Prev never blocks the interface.
-        """
         n = len(self.filtered_indices)
         if n == 0:
             self.pos_var.set("0")
@@ -399,14 +383,6 @@ class AugInspectionApp:
             return {}
 
     def _draw_overlays(self) -> None:
-        """Draw contour / points / angle axis as tagged canvas items.
-
-        Vector items live on the canvas *above* the photo, so they show up on
-        every seed immediately after the image arrives (the old raster-paint
-        approach silently lost them whenever a re-render did not happen), and
-        redrawing them costs microseconds instead of a full resize+PhotoImage
-        conversion.
-        """
         canvas = self.zoom_widget.canvas
         canvas.delete("overlay")
         img = self.zoom_widget.image

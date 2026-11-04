@@ -1,9 +1,3 @@
-"""Contour-based seed geometry and photometric measurements.
-
-All functions here measure the seed *inside its contour* — never the bounding
-box — so they work both on full-image OpenCV contours and on user-drawn
-contours coming from ``*_contour.json`` files.
-"""
 from __future__ import annotations
 
 import math
@@ -111,15 +105,6 @@ def _chord_is_internal(a: tuple[float, float], b: tuple[float, float], pts: np.n
 
 
 def length_axis(contour: np.ndarray | None) -> tuple[float, float, float] | None:
-    """Seed length axis measured between the two most distant contour points.
-
-    Returns ``(length_px, angle_deg, end_to_end_distance)`` where *angle_deg*
-    is the direction of the chord in image coordinates (y grows downwards),
-    normalised to [0, 180).  The diameter chord connects the extreme contour
-    points; when it would leave the shape (strongly concave outline) the
-    longest internal chord found by a local search is used instead, so the
-    length line never crosses the contour.
-    """
     if contour is None:
         return None
     pts = simplify_contour(np.asarray(contour).reshape(-1, 2))
@@ -160,12 +145,6 @@ def compute_median_rgb(
     *,
     is_rgb: bool = False,
 ) -> tuple[int, int, int] | None:
-    """Compute median R, G, B of pixels inside the contour.
-
-    Robust to specular reflections, shadows and noise.
-    Accepts cv2 BGR/RGB ndarray or PIL Image, and contour as (N, 1, 2) / (N, 2) ndarray
-    or list of points/dicts.
-    """
     if image is None or contour is None:
         return None
     if hasattr(image, "convert") and not isinstance(image, np.ndarray):
@@ -211,7 +190,6 @@ def compute_median_color_hex(
     *,
     is_rgb: bool = False,
 ) -> str:
-    """Compute median color of seed inside contour and format as uppercase '#RRGGBB'."""
     rgb = compute_median_rgb(image, contour, is_rgb=is_rgb)
     if rgb is None:
         return ""
@@ -271,12 +249,6 @@ def _axis_angle(mask: np.ndarray, angle_hint: float | None) -> float | None:
 def _rotate_to_axis(
     gray: np.ndarray, mask: np.ndarray, angle_deg: float, center: tuple[float, float],
 ) -> tuple[np.ndarray, np.ndarray] | None:
-    """Развернуть изображение и маску так, чтобы длинная ось стала горизонтальной.
-
-    Холст выбирается с запасом по диагонали, чтобы при повороте ничего
-    не обрезалось. Если после поворота зерно оказалось вертикальным —
-    доворачиваем ещё на 90°.
-    """
     side = int(math.hypot(mask.shape[1], mask.shape[0])) + 8
     if side < 16:
         return None
@@ -304,24 +276,6 @@ def groove_score(
     contour: np.ndarray | None,
     angle_hint: float | None = None,
 ) -> float | None:
-    """Сила продольной бороздки зерна (60-й процентиль контраста тёмного гребня).
-
-    Принцип работы:
-      1. Зерно разворачивается так, чтобы его длинная ось была горизонтальной
-         (ориентация не важна — снимки могут быть любыми).
-      2. Для каждой колонки вдоль оси строится профиль яркости поперёк зерна.
-      3. Внутри центральной зоны (|u| <= 0.35 полуширины) ищется минимум
-         профиля; его контраст к соседним участкам (|u| >= 0.42) и есть отклик
-         на бороздку.
-      4. Итоговый балл — 60-й процентиль контрастов по всем колонкам.
-
-    Такая схема устойчива к ориентации и изгибу зерна: бороздка повторяет
-    центральную линию формы, а её тёмное дно даёт устойчивый минимум. Затемнённые
-    края отсечены зоной 0.6, поперечная трещина затемняет колонку целиком
-    (и минимум, и соседи темнеют вместе — контраста не возникает), случайная
-    косая трещина пересекает центр лишь в нескольких колонках и на средний
-    процентиль почти не влияет.
-    """
     if image_bgr is None or contour is None:
         return None
     pts = np.asarray(contour, dtype=np.int32).reshape(-1, 2)
@@ -408,12 +362,6 @@ def compute_seed_metrics(
     angle_hint: float | None = None,
     groove_threshold: float = GROOVE_SCORE_THRESHOLD,
 ) -> dict[str, Any]:
-    """Вычислить метрики одного зерна по его контуру.
-
-    Возвращает словарь с ``rgb_averaged``, ``groove`` (1 — бороздка есть,
-    0 — нет, None — признак определить не удалось), ``groove_score`` и
-    измерениями длинной оси (``length_px`` / ``angle_deg``).
-    """
     result: dict[str, Any] = {"rgb_averaged": None, "color_hex": "", "groove": None, "groove_score": None}
     axis = length_axis(contour)
     if axis is not None:

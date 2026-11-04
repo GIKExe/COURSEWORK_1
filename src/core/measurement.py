@@ -1,4 +1,3 @@
-"""Seed measurement statistics, status counting, and photometric measurements."""
 from __future__ import annotations
 
 from typing import Any

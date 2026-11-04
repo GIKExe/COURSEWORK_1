@@ -1,4 +1,3 @@
-"""Zoomable canvas widget shared by all GUI applications."""
 from __future__ import annotations
 
 import threading
@@ -27,19 +26,6 @@ SOURCE_CACHE_MAX_BYTES = 256 * 1024 * 1024  # ~256 MB of decoded RGB images
 
 
 def дельта_прокрутки_колесом(event: tk.Event) -> int:
-    """Вычислить шаг прокрутки по событию колеса мыши.
-
-    Общая реализация, заменяющая дубликаты вычисления ``delta``
-    в ``gui.common.zoomable.ZoomableCanvas._on_scroll`` и
-    ``gui.inspection_app.InspectionApp._on_batch_wheel``.
-
-    Параметры:
-        event — событие Tk (``MouseWheel`` либо ``Button-4``/``Button-5``).
-
-    Возвращает ``-1`` — прокрутка вверх, ``1`` — вниз, ``0`` — событие
-    колеса не содержит сдвига (вызывающий код в этом случае ничего
-    не прокручивает).
-    """
     delta = 0
     if getattr(event, "delta", 0):
         delta = -1 if event.delta > 0 else 1
@@ -51,8 +37,6 @@ def дельта_прокрутки_колесом(event: tk.Event) -> int:
 
 
 class _SourceCache:
-    """Small thread-safe LRU cache for decoded source images."""
-
     def __init__(self, max_bytes: int) -> None:
         self._max_bytes = max_bytes
         self._bytes = 0
@@ -90,12 +74,6 @@ def load_image_async(
     canvas: tk.Misc,
     generation: int = 0,
 ) -> None:
-    """Decode *path* off the UI thread and hand the result to *callback*.
-
-    The callback always runs exactly once, in the UI thread: the decoder
-    thread unconditionally publishes its result into *result_box*, and the
-    polling callback re-reads that box before concluding the thread died.
-    """
     cached = _SOURCE_CACHE.get(path)
     if cached is not None:
         callback(cached.copy())
@@ -162,8 +140,6 @@ def load_image_async(
 
 
 class ZoomableCanvas:
-    """Encapsulates zoom/pan logic on a tk.Canvas with scrollbars."""
-
     def __init__(self, parent: ttk.Frame | tk.Frame, bg: str = "#202020") -> None:
         self._frame = parent
         self._frame.columnconfigure(0, weight=1)

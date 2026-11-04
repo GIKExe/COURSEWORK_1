@@ -1,4 +1,3 @@
-"""Main augmentation pipeline: load, split, augment, save."""
 from __future__ import annotations
 
 import json
@@ -59,7 +58,6 @@ def assign_train_val_split(
     val_fraction: float,
     rng: random.Random,
 ) -> None:
-    """Assign 'split': 'train' or 'val' across all photos (originals + augmentations)."""
     if not rows or val_fraction <= 0.0:
         for r in rows:
             r["split"] = "train"
