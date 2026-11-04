@@ -90,7 +90,12 @@ def load_image_async(
     canvas: tk.Misc,
     generation: int = 0,
 ) -> None:
-    """Decode *path* off the UI thread and hand the result to *callback*."""
+    """Decode *path* off the UI thread and hand the result to *callback*.
+
+    The callback always runs exactly once, in the UI thread: the decoder
+    thread unconditionally publishes its result into *result_box*, and the
+    polling callback re-reads that box before concluding the thread died.
+    """
     cached = _SOURCE_CACHE.get(path)
     if cached is not None:
         callback(cached.copy())
@@ -109,26 +114,43 @@ def load_image_async(
                 img.load()
         except Exception:
             img = None
+        payload: Image.Image | None = None
         if img is not None:
-            _SOURCE_CACHE.put(path, img)
-            result_box.append(img.copy())
-        else:
-            result_box.append(None)
+            try:
+                payload = img.copy()
+            except Exception:
+                payload = img
+            try:
+                _SOURCE_CACHE.put(path, img)
+            except Exception:
+                pass
+        # Публикуем результат в любом случае: опрос в главном потоке
+        # ориентируется на заполненность result_box и на жизнь потока,
+        # поэтому колбэк обязан получить ответ даже при сбое кэша.
+        result_box.append(payload)
+
+    def _deliver() -> None:
+        payload = result_box[0] if result_box else None
+        callback(payload if isinstance(payload, Image.Image) else None)
 
     def _check_result() -> None:
-        if not app_root.winfo_exists():
+        try:
+            if not app_root.winfo_exists():
+                return
+        except Exception:
             return
-        if result_box:
-            payload = result_box[0]
-            if isinstance(payload, Image.Image):
-                callback(payload)
-            else:
-                callback(None)
-        elif t.is_alive():
+        # Сначала перечитываем result_box: поток мог опубликовать результат
+        # ровно между двумя прежними проверками («бокс пуст» и «поток ещё
+        # жив»), после чего обе проверки проваливались — и картинка
+        # терялась насовсем: контур оставался на холсте, а изображение
+        # никогда не приходило.
+        if not result_box and t.is_alive():
             try:
                 app_root.after(15, _check_result)
             except Exception:
                 pass
+            return
+        _deliver()
 
     t = threading.Thread(target=_worker, name="image-decode", daemon=True)
     t.start()
@@ -229,9 +251,13 @@ class ZoomableCanvas:
         else:
             resized = src.copy()
 
+        # PhotoImage создаётся до удаления старого кадра: если конвертация
+        # не удастся, на холсте останется прежнее изображение, а не пустота
+        # с контуром поверх («границы есть, картинки нет»).
+        tk_image = ImageTk.PhotoImage(resized)
         self._image = resized
         self.canvas.delete("base")
-        self._tk_image = ImageTk.PhotoImage(resized)
+        self._tk_image = tk_image
         self.canvas.create_image(0, 0, anchor="nw", image=self._tk_image, tags="base")
         self.canvas.tag_lower("base")
         self.canvas.configure(scrollregion=(0, 0, dw, dh))
