@@ -1,0 +1,214 @@
+==============================================================================
+VALIDATION ANALYSIS
+==============================================================================
+seeds CSV: 2600 rows, 8 photos, 325 unique indices
+manual reference: 325 records, 324 measured
+long dataset: 2600 rows; wide dataset: 325 rows
+
+OVERALL length: n=324 manual=8.5947±0.5149 prog=8.9366±0.5167 bias=+0.3419 [+0.3246,+0.3592] sd=0.1583 MAE=0.3432 [0.3268,0.3605] RMSE=0.3767 r=0.9529 CCC=0.7812 slope=0.9562 int=+0.7181 LoA=[+0.0316,+0.6523] ratio=1.0401
+
+OVERALL width: n=324 manual=3.6646±0.2067 prog=2.8791±0.1657 bias=-0.7855 [-0.8033,-0.7677] sd=0.1632 MAE=0.7855 [0.7679,0.8031] RMSE=0.8022 r=0.6356 CCC=0.0634 slope=0.5097 int=+1.0113 LoA=[-1.1054,-0.4656] ratio=0.7865
+
+WIDTH RATIO: mean=0.7865 sd=0.0383 CI=[0.7823,0.7907] pi/4=0.7854 p=0.598; pi/4*manual mean=2.8781 vs actual=2.8791
+
+PER-PHOTO
+  1_1 length n=324 bias=+0.320 MAE=0.331 r=0.929 mm/px=0.068465
+  1_1  width n=324 bias=-0.779 MAE=0.779 r=0.633 mm/px=0.068465
+  1_2 length n=324 bias=+0.270 MAE=0.291 r=0.928 mm/px=0.066822
+  1_2  width n=324 bias=-0.743 MAE=0.743 r=0.600 mm/px=0.066822
+  1_3 length n=324 bias=+0.303 MAE=0.315 r=0.934 mm/px=0.063253
+  1_3  width n=324 bias=-0.703 MAE=0.703 r=0.519 mm/px=0.063253
+  2_1 length n=324 bias=+0.112 MAE=0.217 r=0.901 mm/px=0.066270
+  2_1  width n=324 bias=-0.895 MAE=0.895 r=0.674 mm/px=0.066270
+ 2_1p length n=324 bias=+0.496 MAE=0.499 r=0.924 mm/px=0.064464
+ 2_1p  width n=324 bias=-0.777 MAE=0.777 r=0.611 mm/px=0.064464
+  2_2 length n=324 bias=+0.110 MAE=0.211 r=0.904 mm/px=0.063195
+  2_2  width n=324 bias=-0.899 MAE=0.899 r=0.658 mm/px=0.063195
+ 2_2p length n=324 bias=+0.497 MAE=0.501 r=0.924 mm/px=0.063944
+ 2_2p  width n=324 bias=-0.768 MAE=0.768 r=0.567 mm/px=0.063944
+ 2_3p length n=324 bias=+0.627 MAE=0.629 r=0.881 mm/px=0.070832
+ 2_3p  width n=324 bias=-0.721 MAE=0.721 r=0.558 mm/px=0.070832
+
+SUBGROUPS
+все зерна                        n=324 bias=+0.342 MAE=0.343 r=0.953
+без ряда 11                      n=300 bias=+0.339 MAE=0.340 r=0.953
+только ряд 11                    n=24 bias=+0.373 MAE=0.377 r=0.954
+P-снимки (length)                n=324 bias=+0.540 MAE=0.543 r=0.918
+non-P снимки (length)            n=324 bias=+0.223 MAE=0.251 r=0.929
+заявленный лучший фокус (length) n=324 bias=+0.293 MAE=0.297 r=0.947
+остальные снимки (length)        n=324 bias=+0.371 MAE=0.372 r=0.954
+все зерна                        n=324 bias=-0.785 MAE=0.785 r=0.636
+без ряда 11                      n=300 bias=-0.785 MAE=0.785 r=0.648
+только ряд 11                    n=24 bias=-0.793 MAE=0.793 r=0.534
+P-снимки (width)                 n=324 bias=-0.755 MAE=0.755 r=0.584
+non-P снимки (width)             n=324 bias=-0.804 MAE=0.804 r=0.646
+заявленный лучший фокус (width)  n=324 bias=-0.805 MAE=0.805 r=0.662
+остальные снимки (width)         n=324 bias=-0.774 MAE=0.774 r=0.616
+
+REPEATABILITY
+все 8 снимков                    length k=8 n=325 Sw=0.246 ICC=0.811 [0.775,0.838] RC=0.681
+все 8 снимков                     width k=8 n=325 Sw=0.097 ICC=0.738 [0.700,0.770] RC=0.267
+P-снимки (3)                     length k=3 n=325 Sw=0.112 ICC=0.953 [0.937,0.965] RC=0.311
+P-снимки (3)                      width k=3 n=325 Sw=0.045 ICC=0.939 [0.924,0.954] RC=0.125
+non-P снимки (5)                 length k=5 n=325 Sw=0.140 ICC=0.938 [0.925,0.948] RC=0.387
+non-P снимки (5)                  width k=5 n=325 Sw=0.108 ICC=0.679 [0.634,0.717] RC=0.299
+заявленный лучший фокус (3)      length k=3 n=325 Sw=0.255 ICC=0.796 [0.754,0.828] RC=0.707
+заявленный лучший фокус (3)       width k=3 n=325 Sw=0.105 ICC=0.678 [0.626,0.721] RC=0.290
+остальные снимки (5)             length k=5 n=325 Sw=0.262 ICC=0.784 [0.744,0.815] RC=0.724
+остальные снимки (5)              width k=5 n=325 Sw=0.100 ICC=0.727 [0.689,0.759] RC=0.276
+
+PAIRED COMPARISONS
+2_1p − 2_1                       length n=325 diff=+0.384 [+0.352,+0.416] p_t=5.42e-73 p_w=1.68e-51 r=0.858
+2_1p − 2_1                        width n=325 diff=+0.118 [+0.106,+0.130] p_t=3.20e-57 p_w=1.71e-44 r=0.802
+2_2p − 2_2                       length n=325 diff=+0.387 [+0.355,+0.418] p_t=3.80e-74 p_w=1.94e-50 r=0.857
+2_2p − 2_2                        width n=325 diff=+0.130 [+0.117,+0.143] p_t=2.60e-59 p_w=3.37e-43 r=0.783
+P-среднее − non-P-среднее        length n=325 diff=+0.316 [+0.287,+0.345] p_t=6.43e-64 p_w=2.36e-49 r=0.875
+P-среднее − non-P-среднее         width n=325 diff=+0.048 [+0.040,+0.056] p_t=1.19e-26 p_w=3.41e-26 r=0.910
+лучший фокус − остальные         length n=325 diff=-0.079 [-0.086,-0.072] p_t=1.06e-67 p_w=3.81e-51 r=0.993
+лучший фокус − остальные          width n=325 diff=-0.031 [-0.034,-0.027] p_t=9.58e-47 p_w=8.76e-37 r=0.981
+non-P: 1_2+2_1 − 1_1+1_3+2_2     length n=325 diff=-0.054 [-0.059,-0.048] p_t=5.87e-51 p_w=4.26e-41 r=0.995
+P: 2_1p − 2_2p+2_3p              length n=325 diff=-0.066 [-0.074,-0.058] p_t=8.29e-44 p_w=1.01e-44 r=0.990
+non-P: 1_2+2_1 − 1_1+1_3+2_2      width n=325 diff=-0.025 [-0.029,-0.022] p_t=6.17e-36 p_w=3.53e-29 r=0.981
+P: 2_1p − 2_2p+2_3p               width n=325 diff=-0.032 [-0.036,-0.029] p_t=4.12e-44 p_w=9.93e-40 r=0.980
+
+STATUS EFFECT (within-seed deviation, mm)
+length focused    n_obs=1229 n_seeds=258 mean=+0.009 sd=0.229
+length transition n_obs=1337 n_seeds=314 mean=-0.006 sd=0.231
+length blurry     n_obs=34 n_seeds=23 mean=-0.076 sd=0.219
+ width focused    n_obs=1229 n_seeds=258 mean=-0.013 sd=0.069
+ width transition n_obs=1337 n_seeds=314 mean=+0.012 sd=0.103
+ width blurry     n_obs=34 n_seeds=23 mean=+0.009 sd=0.169
+Kruskal-Wallis length: H=10.65 p=0.00488
+Kruskal-Wallis width: H=122.75 p=2.22e-27
+
+BY ROW
+row  1 n=25 L bias=+0.299 W bias=-0.793
+row  2 n=25 L bias=+0.286 W bias=-0.811
+row  3 n=25 L bias=+0.337 W bias=-0.762
+row  4 n=25 L bias=+0.304 W bias=-0.773
+row  5 n=25 L bias=+0.335 W bias=-0.770
+row  6 n=25 L bias=+0.306 W bias=-0.789
+row  7 n=25 L bias=+0.350 W bias=-0.806
+row  8 n=25 L bias=+0.350 W bias=-0.759
+row  9 n=25 L bias=+0.327 W bias=-0.746
+row 10 n=25 L bias=+0.373 W bias=-0.812
+row 11 n=24 L bias=+0.373 W bias=-0.793
+row 12 n=25 L bias=+0.419 W bias=-0.799
+row 13 n=25 L bias=+0.388 W bias=-0.799
+
+OUTLIERS (robust |z|>3.5)
+length: 5 seeds
+width: 3 seeds
+overlap length & width outliers: 0
+
+MANUAL SUMMARY
+длина    n=324 mean=8.5947 sd=0.5149 median=8.6000 min=7.2000 max=9.8000 unique=55 grid0.05=99.1% grid0.1=52.8%
+ширина   n=324 mean=3.6646 sd=0.2067 median=3.6500 min=2.9000 max=4.4500 unique=29 grid0.05=98.8% grid0.1=49.7%
+толщина  n=324 mean=2.7847 sd=0.1474 median=2.8000 min=2.2000 max=3.2500 unique=21 grid0.05=99.1% grid0.1=57.4%
+масса    n=324 mean=0.0500 sd=0.0204 median=0.0489 min=0.0283 max=0.2977 unique=238 grid0.05=0.3% grid0.1=0.0%
+TGW from manual mass: 50.02 g
+manual mass outliers:
+  serial 162 row 7 pos 12 mass=0.29765 z=35.1
+  serial 310 row 13 pos 10 mass=0.29195 z=34.3
+manual mass without outliers: n=322 mean=0.04850 g sd=0.00664 median=0.04880 TGW=48.50 g
+
+GROOVE BY PHOTO
+  1_1 non-P 31/325 = 9.5% [6.8,13.2]
+  1_2 non-P 44/325 = 13.5% [10.2,17.7]
+  1_3 non-P 22/325 = 6.8% [4.5,10.0]
+  2_1 non-P 14/325 = 4.3% [2.6,7.1]
+ 2_1p     P 306/325 = 94.2% [91.1,96.2]
+  2_2 non-P 22/325 = 6.8% [4.5,10.0]
+ 2_2p     P 297/325 = 91.4% [87.8,94.0]
+ 2_3p     P 262/325 = 80.6% [76.0,84.5]
+P all                      865/975 = 88.7% [86.6,90.6]
+non-P all                  133/1625 = 8.2% [6.9,9.6]
+P without 2_1/2_1p         559/650 = 86.0% [83.1,88.5]
+non-P without 2_1/2_1p     119/1300 = 9.2% [7.7,10.8]
+
+CALIBRATION
+mean rel diff = -0.305% sd = 1.064% min = -2.095% max = +1.209%
+t-test vs 0: t=-0.81 p=0.444
+
+SEGMENTATION
+  1_1 n=325 rows=13 per_row=25-25 NN=109.5/135.5px mapping_mismatch=0
+  1_2 n=325 rows=13 per_row=25-25 NN=111.5/138.5px mapping_mismatch=0
+  1_3 n=325 rows=13 per_row=25-25 NN=117.5/146.0px mapping_mismatch=0
+  2_1 n=325 rows=13 per_row=25-25 NN=104.6/139.2px mapping_mismatch=0
+ 2_1p n=325 rows=13 per_row=25-25 NN=112.5/140.3px mapping_mismatch=0
+  2_2 n=325 rows=13 per_row=25-25 NN=108.5/145.6px mapping_mismatch=0
+ 2_2p n=325 rows=13 per_row=25-25 NN=113.0/141.6px mapping_mismatch=0
+ 2_3p n=325 rows=13 per_row=25-25 NN=103.0/128.5px mapping_mismatch=0
+
+DETERMINISM
+ rows_first  rows_final  max_abs_diff_numeric  status_differences  color_differences  groove_differences
+        325         325                   0.0                   0                  0                   0
+
+RUN LOG
+     label     file  width_px  height_px  found  saved  focused  blurry  mm_per_px  elapsed_s  rc
+1_2_second  1_2.jpg      4689       3064    325    325      113       3   0.066822       4.05   0
+       1_1  1_1.jpg      4668       3064    325    325      158       1   0.068465       4.43   0
+       1_3  1_3.jpg      4877       3064    325    325       11      18   0.063253       6.82   0
+       2_1  2_1.jpg      4885       3064    325    325      237       0   0.066270       4.20   0
+      2_1p 2_1p.jpg      4943       3064    325    325      211       0   0.064464       4.49   0
+       2_2  2_2.jpg      4979       3064    325    325      139      12   0.063195       6.07   0
+      2_2p 2_2p.jpg      4798       3064    325    325      179       0   0.063944       5.08   0
+      2_3p 2_3p.jpg      4540       3064    325    325      181       0   0.070832       4.89   0
+
+MISSING-SEED k TEST (row 11)
+best k by length MAE: 19; MAE=0.3657; k=25 MAE=0.3767 r=0.9540
+ k  mae_length  r_length
+ 1       0.658     0.006
+ 2       0.601     0.113
+ 3       0.613     0.146
+ 4       0.610     0.141
+ 5       0.616     0.150
+ 6       0.611     0.220
+ 7       0.583     0.266
+ 8       0.552     0.347
+ 9       0.518     0.461
+10       0.511     0.466
+11       0.507     0.468
+12       0.506     0.469
+13       0.487     0.537
+14       0.403     0.853
+15       0.408     0.885
+16       0.406     0.885
+17       0.408     0.922
+18       0.377     0.956
+19       0.366     0.973
+20       0.378     0.973
+21       0.370     0.970
+22       0.388     0.968
+23       0.387     0.968
+24       0.378     0.955
+25       0.377     0.954
+
+SHIFT TEST (rows 12-13)
+                 mapping  n         r      mae     bias
+                  прямое 50  0.936845 0.407193 0.403167
+программа = серийный − 1 50  0.009740 0.666148 0.410401
+программа = серийный + 1 49 -0.030572 0.712986 0.399820
+
+MISSING SEED 275 DETAILS
+photo     cx     cy  bw  bh      nn_px
+  1_1 3968.5 2089.5  67 133 137.980071
+  1_2 3979.0 2040.0  72 138 142.923931
+  1_3 4304.0 2147.0  78 148 151.018211
+  2_1 4118.0 2180.5  64 135 164.503039
+ 2_1p 4226.5 2201.5  71 143 189.516490
+  2_2 4308.5 2244.0  69 144 172.511594
+ 2_2p 4257.0 2210.0  72 144 190.553142
+ 2_3p 3815.5 2198.5  65 131 172.002907
+
+ALTERNATIVE GEOMETRIC DEFINITIONS (per-seed mean over 8 photos)
+экспортируемая длина (макс. хорда)     n=324 bias=+0.342 sd=0.158 MAE=0.343 r=0.953 ratio=1.0401
+протяжённость вдоль оси хорды          n=324 bias=+0.342 sd=0.158 MAE=0.343 r=0.953 ratio=1.0401
+длинная сторона minAreaRect            n=324 bias=+0.266 sd=0.168 MAE=0.274 r=0.948 ratio=1.0312
+экспортируемая ширина                  n=324 bias=-0.785 sd=0.163 MAE=0.785 r=0.636 ratio=0.7865
+площадь hull / длина                   n=324 bias=-0.785 sd=0.163 MAE=0.785 r=0.636 ratio=0.7865
+короткая сторона minAreaRect           n=324 bias=+0.321 sd=0.177 MAE=0.325 r=0.681 ratio=1.0885
+протяжённость поперёк оси              n=324 bias=+0.364 sd=0.178 MAE=0.368 r=0.675 ratio=1.1004
+branch hull wins: 100.0%
+max |width_exported - min(hull,len,rect)| = 0.000500 px
+max |length_extent - length_exported| = 0.000510 px

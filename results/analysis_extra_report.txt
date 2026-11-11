@@ -1,0 +1,19 @@
+ROBUST METRICS
+parameter   n  mean_bias  median_bias        q1        q3      iqr    trim10    trim20      mape  median_ape  spearman_rho   spearman_p  n_clean  bias_clean  mae_clean  rmse_clean
+    Длина 324   0.341941     0.331515  0.252414  0.426248 0.173834  0.334822  0.332814  4.022810    3.799012     -0.118679 3.271848e-02      319    0.333288   0.334530    0.362683
+   Ширина 324  -0.785494    -0.791300 -0.892552 -0.693071 0.199481 -0.790833 -0.793633 21.347872   21.635819     -0.582850 7.185386e-31      321   -0.783495   0.783495    0.798354
+
+PHOTO FACTOR CORRELATIONS (n=8)
+parameter            factor  pearson_r  pearson_p  spearman_rho  spearman_p
+    Длина         mm_per_px   0.394926   0.332905      0.452381    0.260405
+    Длина        brightness  -0.184900   0.661134     -0.035929    0.932691
+    Длина     brightness_sd   0.293658   0.480227      0.261905    0.530923
+    Длина edge_width_median  -0.055019   0.897047     -0.261905    0.530923
+   Ширина         mm_per_px   0.269014   0.519406      0.214286    0.610344
+   Ширина        brightness   0.038540   0.927809      0.035929    0.932691
+   Ширина     brightness_sd  -0.330985   0.423238     -0.547619    0.160026
+   Ширина edge_width_median   0.558432   0.150256      0.428571    0.289403
+
+COLOR STABILITY: median within-seed brightness SD = 7.57
+Spearman(brightness SD, length SD) = -0.058, p=0.2939
+Spearman(brightness SD, width SD) = -0.047, p=0.3951
