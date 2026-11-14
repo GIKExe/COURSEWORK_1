@@ -342,8 +342,11 @@ class AugInspectionApp:
                     self.current_contour_pts = [(float(p[0]), float(p[1])) for p in pts]
                     if len(self.current_contour_pts) >= 3:
                         try:
+                            # Use the stored edge width: the CSV geometry and
+                            # the overlay must apply the same boundary fix.
                             self.current_geometry = measure_contour_geometry(
-                                self.current_contour_pts
+                                self.current_contour_pts,
+                                edge_width_px=parse_float(record.get("edge_width_px")),
                             )
                         except Exception:
                             self.current_geometry = {}

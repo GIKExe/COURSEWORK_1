@@ -113,6 +113,11 @@ def find_descending_crossing(x: np.ndarray, y: np.ndarray, level: float) -> floa
 
 
 def estimate_edge_width(gray: np.ndarray, contour: np.ndarray, bbox: tuple[int, int, int, int], max_points: int = 160) -> float | None:
+    """Estimate the 80–20 % intensity-transition width (px) around a contour.
+
+    Besides focus classification, this value feeds the edge-band correction in
+    :func:`core.seed_geometry.measure_contour_geometry`.
+    """
     x, y, w, h = bbox
     if w < 4 or h < 4:
         return None
@@ -304,9 +309,10 @@ def process_image(img_bgr: np.ndarray, params: dict[str, Any]) -> ProcessResult:
 
         # Length, width and rotation angle are measured along the seed contour
         # itself: the longest chord between two contour points, and the widest
-        # perpendicular chord that stays inside the contour.  The bounding-box
-        # rectangle is used only for drawing.
-        metrics = compute_seed_metrics(img_bgr, cand["contour"])
+        # perpendicular chord that stays inside the contour.  The measured
+        # edge width pulls both chords inward to the physical boundary; the
+        # bounding-box rectangle is used only for drawing.
+        metrics = compute_seed_metrics(img_bgr, cand["contour"], edge_width_px=ew)
         length_px = float(metrics.get("length_px", max(side_a, side_b)))
         width_px = float(metrics.get("width_px", min(side_a, side_b)))
         if width_px <= 0:

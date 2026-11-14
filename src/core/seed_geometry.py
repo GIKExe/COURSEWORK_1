@@ -391,7 +391,40 @@ def _aligned_endpoints(
     return (p1 + p2) / 2.0, (q1 + q2) / 2.0
 
 
-def measure_contour_geometry(contour: np.ndarray | None) -> dict[str, Any]:
+# The binary Otsu contour follows the outer side of the 80–20 % focus
+# transition, so the physical seed boundary lies about half an edge width
+# inside it.  Shrinking each chord by this fraction at both ends removes the
+# additive boundary bias without changing the measurement direction.
+EDGE_INSET_FRACTION = 0.5
+
+
+def _shrink_chord(
+    a: tuple[float, float] | np.ndarray,
+    b: tuple[float, float] | np.ndarray,
+    inset: float,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Pull both ends of a chord inward by *inset* pixels along the chord.
+
+    A uniform dilation of the silhouette adds the same amount to every chord,
+    so moving each endpoint inward by half an edge width compensates it while
+    keeping the chord direction unchanged.
+    """
+    p = np.asarray(a, dtype=np.float64)
+    q = np.asarray(b, dtype=np.float64)
+    length = float(np.linalg.norm(q - p))
+    if length <= 1e-9 or inset <= 0.0:
+        return p, q, length
+    # Never collapse the chord: leave at least 10 % of its original length.
+    r = min(float(inset), 0.45 * length)
+    u = (q - p) / length
+    return p + u * r, q - u * r, length - 2.0 * r
+
+
+def measure_contour_geometry(
+    contour: np.ndarray | None,
+    *,
+    edge_width_px: float | None = None,
+) -> dict[str, Any]:
     """Measure the seed from its contour alone (no image needed).
 
     The measurement is a perpendicular cross built from two bases:
@@ -405,6 +438,10 @@ def measure_contour_geometry(contour: np.ndarray | None) -> dict[str, Any]:
     endpoints of both bases.  Since the two length bases are parallel and the
     two width bases are parallel, the averaged segments stay perpendicular.
 
+    ``edge_width_px`` is the measured 80–20 % focus-transition width.  The
+    binary contour sits on its outer side, so both chords are shortened by
+    half that width at each end.  Pass ``None`` to measure the raw contour.
+
     Returns ``length_px``, ``angle_deg``, ``length_endpoints``, ``width_px``,
     ``width_endpoints``, ``width_position`` and ``shape``.  Missing keys mean
     that the contour was degenerate.
@@ -414,6 +451,16 @@ def measure_contour_geometry(contour: np.ndarray | None) -> dict[str, Any]:
     pts = simplify_contour(np.asarray(contour).reshape(-1, 2))
     if len(pts) < 3:
         return {}
+    # Pull the measurement boundary half a transition width inside the binary
+    # contour; without an edge estimate the raw contour is used unchanged.
+    inset = 0.0
+    if edge_width_px is not None:
+        try:
+            edge_width = float(edge_width_px)
+        except (TypeError, ValueError):
+            edge_width = 0.0
+        if math.isfinite(edge_width) and edge_width > 0.0:
+            inset = EDGE_INSET_FRACTION * edge_width
     # Measure in a local frame.  The contour JSON keeps crop-local coordinates
     # while the segmentation pipeline measures source-image coordinates; the
     # shift between them must not change any result (including shape, which can
@@ -427,6 +474,7 @@ def measure_contour_geometry(contour: np.ndarray | None) -> dict[str, Any]:
 
     width_base = maximum_internal_width(pts, a1, b1)
     if width_base is None:
+        a1, b1, length1 = _shrink_chord(a1, b1, inset)
         angle = float(math.degrees(math.atan2(b1[1] - a1[1], b1[0] - a1[0]))) % 180.0
         return {
             "length_px": round(float(length1), 3),
@@ -460,10 +508,17 @@ def measure_contour_geometry(contour: np.ndarray | None) -> dict[str, Any]:
         return {}
 
     # Shape is classified from the width profile across the final length axis.
+    # The profile is taken from the raw contour: the templates were tuned on
+    # it, and the edge bias is an almost constant width offset.
     profile_result = maximum_internal_width(pts, a_final, b_final)
     if profile_result is not None:
         _, _, profile, x, position = profile_result
     shape = classify_seed_shape(profile, x, length_final / max(width_final, 1e-9))
+
+    # Remove the additive edge-band dilation from the reported chords.  The
+    # shape above intentionally keeps using the raw (outer) contour.
+    a_final, b_final, length_final = _shrink_chord(a_final, b_final, inset)
+    c_final, d_final, width_final = _shrink_chord(c_final, d_final, inset)
     angle = float(math.degrees(math.atan2(
         float(b_final[1] - a_final[1]), float(b_final[0] - a_final[0])
     ))) % 180.0
@@ -704,13 +759,14 @@ def compute_seed_metrics(
     image_bgr: np.ndarray,
     contour: np.ndarray | None,
     *,
+    edge_width_px: float | None = None,
     angle_hint: float | None = None,
     groove_threshold: float = GROOVE_SCORE_THRESHOLD,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "rgb_averaged": None, "color_hex": "", "groove": None, "groove_score": None,
     }
-    result.update(measure_contour_geometry(contour))
+    result.update(measure_contour_geometry(contour, edge_width_px=edge_width_px))
     rgb = rgb_averaged(image_bgr, contour)
     if rgb is not None:
         result["rgb_averaged"] = f"{rgb[0]:.1f};{rgb[1]:.1f};{rgb[2]:.1f}"

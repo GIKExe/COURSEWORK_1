@@ -842,7 +842,13 @@ class InspectionApp:
         if not self.records or len(self.contour_points) < 3:
             return
         record = self.records[self.current]
-        geometry = measure_contour_geometry(np.asarray(self.contour_points, dtype=np.float64))
+        # Keep the recomputed geometry consistent with the saved CSV: use the
+        # stored edge width so the same edge-band correction is applied.
+        edge_width = parse_float(record.get("edge_width_px"))
+        geometry = measure_contour_geometry(
+            np.asarray(self.contour_points, dtype=np.float64),
+            edge_width_px=edge_width,
+        )
         if not geometry:
             return
         for key in ("length_px", "width_px", "angle_deg"):
