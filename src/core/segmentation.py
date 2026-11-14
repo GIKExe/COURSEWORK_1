@@ -10,7 +10,7 @@ from core.contour_mask import contour_mask
 from core.io_utils import to_gray, to_uint8 as _to_uint8
 from core.models import ProcessResult, SeedItem, SeedStatus, STATUS_COLORS
 from core.params import ensure_odd
-from core.seed_geometry import compute_seed_metrics
+from core.seed_geometry import SHAPE_CYLINDRICAL, compute_seed_metrics
 
 
 def otsu_binarize(image: np.ndarray) -> np.ndarray:
@@ -302,22 +302,24 @@ def process_image(img_bgr: np.ndarray, params: dict[str, Any]) -> ProcessResult:
         box = cv2.boxPoints(rect)
         side_a, side_b = rect[1]
 
-        # Length and rotation angle are measured along the seed contour itself:
-        # the longest chord between the two most distant contour points that
-        # does not cross the contour (never the bounding-box rectangle).
+        # Length, width and rotation angle are measured along the seed contour
+        # itself: the longest chord between two contour points, and the widest
+        # perpendicular chord that stays inside the contour.  The bounding-box
+        # rectangle is used only for drawing.
         metrics = compute_seed_metrics(img_bgr, cand["contour"])
         length_px = float(metrics.get("length_px", max(side_a, side_b)))
-        angle_deg = float(metrics.get("angle_deg", 0.0))
-        width_px = min(float(cv2.contourArea(cv2.convexHull(cand["contour"])) / max(length_px, 1e-6)),
-                       float(min(side_a, side_b)))
+        width_px = float(metrics.get("width_px", min(side_a, side_b)))
         if width_px <= 0:
             width_px = float(min(side_a, side_b))
+        angle_deg = float(metrics.get("angle_deg", 0.0))
+        shape = str(metrics.get("shape", "")).strip() or SHAPE_CYLINDRICAL
 
         item: SeedItem = dict(cand)
         item.update(
             rect=rect, box=box, center_x=float(rect[0][0]), center_y=float(rect[0][1]),
             length_px=length_px, width_px=width_px,
             angle_deg=angle_deg, edge_width=ew, status=status,
+            shape=shape,
             rgb_averaged=metrics.get("rgb_averaged"),
             color_hex=metrics.get("color_hex", ""),
             groove=metrics.get("groove"),

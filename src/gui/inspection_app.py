@@ -7,6 +7,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
 
+import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
 from core.contour_io import parse_raw_points
@@ -14,7 +15,7 @@ from core.csv_utils import merge_fieldnames, read_csv_robust, write_csv
 import re
 from core.io_utils import fmt_float, parse_float
 from core.models import AUG_EXTRA_FIELDS, DEFAULT_CSV_FIELDS, EXTRA_EDITABLE_FIELDS, IMAGE_EXTENSIONS, SKIP_CSV_FIELDS, is_augmentation
-from core.seed_geometry import compute_median_color_hex
+from core.seed_geometry import SHAPE_OPTIONS, compute_median_color_hex, measure_contour_geometry
 from gui.common.file_scan import scan_directory
 from gui.common.ruler import draw_canvas_ruler
 from gui.common.widgets import (
@@ -75,7 +76,7 @@ class InspectionApp:
         self.dirty = False
         self.unsaved = False
         self.load_error: str | None = None
-        self.shape_options: list[str] = []
+        self.shape_options: list[str] = list(SHAPE_OPTIONS)
         self.status_options: list[str] = []
         self.contour_points: list[tuple[float, float]] = []
         self.contour_path: str | None = None
@@ -155,14 +156,12 @@ class InspectionApp:
                 self.aug_records.append(clean)
             else:
                 self.records.append(clean)
-        shape_set: set[str] = set()
         status_set: set[str] = set()
         for r in self.records:
-            if r.get("shape", "").strip():
-                shape_set.add(r["shape"].strip())
             if r.get("status", "").strip():
                 status_set.add(r["status"].strip())
-        self.shape_options = sorted(shape_set)
+        # Ровно три класса формы; значения вычисляются автоматически по контуру.
+        self.shape_options = list(SHAPE_OPTIONS)
         self.status_options = sorted(status_set)
 
     @staticmethod
@@ -362,10 +361,12 @@ class InspectionApp:
 
         ttk.Label(form, text="Форма:").grid(row=row, column=0, sticky="w", padx=(0, 10), pady=3)
         self.shape_var = tk.StringVar()
-        self.shape_box = ttk.Combobox(form, textvariable=self.shape_var, values=self.shape_options, width=17)
+        self.shape_box = ttk.Combobox(
+            form, textvariable=self.shape_var, values=self.shape_options,
+            width=17, state="readonly",
+        )
         self.shape_box.grid(row=row, column=1, sticky="ew", pady=3)
         self.shape_box.bind("<<ComboboxSelected>>", self._mark_dirty)
-        self.shape_box.bind("<KeyRelease>", self._mark_dirty)
         row += 1
 
         ttk.Separator(form, orient="horizontal").grid(row=row, column=0, columnspan=2, sticky="ew", pady=8); row += 1
@@ -836,10 +837,35 @@ class InspectionApp:
             return ""
         return compute_median_color_hex(src_img, self.contour_points)
 
+    def _refresh_contour_geometry(self) -> None:
+        """Пересчитать длину, ширину, угол и форму по текущему контуру."""
+        if not self.records or len(self.contour_points) < 3:
+            return
+        record = self.records[self.current]
+        geometry = measure_contour_geometry(np.asarray(self.contour_points, dtype=np.float64))
+        if not geometry:
+            return
+        for key in ("length_px", "width_px", "angle_deg"):
+            value = geometry.get(key)
+            if value is None:
+                continue
+            text = fmt_float(value, 3)
+            record[key] = text
+            var = self._readonly_vars.get(key)
+            if var is not None:
+                var.set(text)
+        shape = str(geometry.get("shape", "")).strip()
+        if shape:
+            record["shape"] = shape
+            self.shape_var.set(shape)
+
     def _on_contour_modified(self) -> None:
-        """Обновлять живой показ цвета при изменении контура."""
+        """Обновлять геометрию, форму и живой показ цвета при изменении контура."""
+        if not self.records or len(self.contour_points) < 3:
+            return
+        self._refresh_contour_geometry()
         src_img = getattr(self.zoom_widget, "_source_image", None) or self.zoom_widget.image
-        if not self.records or src_img is None or len(self.contour_points) < 3:
+        if src_img is None:
             return
         hex_code = self._recompute_current_color()
         if hex_code:
@@ -956,6 +982,9 @@ class InspectionApp:
         else:
             return False
         self.contour_path = path
+        # Геометрия и форма всегда пересчитываются по загруженному контуру:
+        # в старых CSV этих полей могло не быть, а контур мог быть исправлен.
+        self._refresh_contour_geometry()
         return True
 
     @staticmethod
@@ -1236,7 +1265,8 @@ class InspectionApp:
                 json.dump(payload, fh, ensure_ascii=False, indent=2)
             self.contour_dirty = False
 
-            # Пересчитываем цвет по изменённому контуру и обновляем запись и интерфейс
+            # Пересчитываем геометрию/форму и цвет по изменённому контуру
+            self._refresh_contour_geometry()
             hex_code = self._recompute_current_color()
             if hex_code:
                 record["color_hex"] = hex_code
@@ -1303,10 +1333,6 @@ class InspectionApp:
 
         record["shape"] = self.shape_var.get().strip()
         record["status"] = self.status_var.get().strip()
-        if record["shape"] and record["shape"] not in self.shape_options:
-            self.shape_options.append(record["shape"])
-            self.shape_options.sort()
-            self.shape_box.configure(values=self.shape_options)
         if record["status"] and record["status"] not in self.status_options:
             self.status_options.append(record["status"])
             self.status_options.sort()

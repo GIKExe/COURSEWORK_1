@@ -36,6 +36,7 @@ DEFAULT_CSV_FIELDS: list[str] = [
     "file_index", "index", "status", "color_hex", "edge_width_px",
     "length_px", "width_px", "angle_deg", "area_px",
     "has_groove",
+    "shape",
     "mm_per_px",
 ]
 
@@ -72,6 +73,7 @@ class SeedItem(SeedCandidate, total=False):
     length_px: float
     width_px: float
     angle_deg: float
+    shape: str
     edge_width: float | None
     status: str
     color_hex: str

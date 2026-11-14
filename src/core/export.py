@@ -100,6 +100,8 @@ def build_seed_csv_row(
         "area_px": fmt_float(item.get("area"), 1),
         # Бинарный признак бороздки: 1 — есть, 0 — нет
         "has_groove": "" if has_groove is None else int(has_groove),
+        # Форма зерна, определённая автоматически по контуру.
+        "shape": str(item.get("shape") or "").strip(),
         "mm_per_px": fmt_float(mm_per_px, 8) if mm_per_px is not None else "",
     }
 

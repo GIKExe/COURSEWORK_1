@@ -104,12 +104,11 @@ def _chord_is_internal(a: tuple[float, float], b: tuple[float, float], pts: np.n
     return True
 
 
-def length_axis(contour: np.ndarray | None) -> tuple[float, float, float] | None:
-    if contour is None:
-        return None
-    pts = simplify_contour(np.asarray(contour).reshape(-1, 2))
-    if len(pts) < 2:
-        return None
+def _longest_internal_chord(
+    pts: np.ndarray,
+) -> tuple[tuple[float, float], tuple[float, float], float] | None:
+    """Longest chord between contour points that does not leave the contour."""
+    pts = np.asarray(pts, dtype=np.float64).reshape(-1, 2)
     pair = farthest_pair(pts)
     if pair is None:
         return None
@@ -135,8 +134,284 @@ def length_axis(contour: np.ndarray | None) -> tuple[float, float, float] | None
         if best_pair is not None and best_len > 0:
             a, b = best_pair
             dist = best_len
+    return a, b, dist
+
+
+def length_axis(contour: np.ndarray | None) -> tuple[float, float, float] | None:
+    """Return ``(length, angle_deg, length)`` for the longest internal chord.
+
+    The third element is kept for backward compatibility; use
+    :func:`measure_contour_geometry` when the actual chord endpoints are needed.
+    """
+    if contour is None:
+        return None
+    pts = simplify_contour(np.asarray(contour).reshape(-1, 2))
+    if len(pts) < 2:
+        return None
+    chord = _longest_internal_chord(pts)
+    if chord is None:
+        return None
+    a, b, dist = chord
     angle = float(math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))) % 180.0
     return dist, angle, dist
+
+
+# --- Ширина как максимальная внутренняя хорда -------------------------------
+# Ширина измеряется поперёк длинной оси: для каждого положения вдоль хорды
+# строится перпендикулярная прямая, находятся все её пересечения с контуром и
+# берётся максимальный интервал, целиком лежащий внутри контура. Максимум по
+# всем положениям и есть ширина. Это ровно «максимальное расстояние двух
+# противоположных точек, не пересекающее контур», без эллипсов, прямоугольников
+# и усреднений по площади.
+_WIDTH_SAMPLES = 192
+_WIDTH_MERGE_EPS = 1e-7
+
+
+def maximum_internal_width(
+    pts: np.ndarray,
+    a: tuple[float, float] | np.ndarray,
+    b: tuple[float, float] | np.ndarray,
+    *,
+    samples: int = _WIDTH_SAMPLES,
+) -> tuple[float, tuple[tuple[float, float], tuple[float, float]], np.ndarray, np.ndarray, float] | None:
+    """Maximum chord perpendicular to the ``a``-``b`` axis, inside the polygon.
+
+    Returns ``(width, (p1, p2), profile, x, s_max)`` where ``profile`` is the
+    widest internal interval at each sampled position along the axis,
+    ``x`` are normalised positions in ``[0, 1]`` and ``s_max`` is the position
+    of the maximum.  All coordinates are in the same space as ``pts``.
+    """
+    pts = np.asarray(pts, dtype=np.float64).reshape(-1, 2)
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    length = float(math.hypot(float(b[0] - a[0]), float(b[1] - a[1])))
+    if length <= 1e-9 or len(pts) < 3:
+        return None
+
+    u = (b - a) / length
+    n = np.array([-u[1], u[0]], dtype=np.float64)
+
+    p0 = pts
+    p1 = np.roll(pts, -1, axis=0)
+    d = p1 - p0
+    den = n[0] * d[:, 1] - n[1] * d[:, 0]
+    edge_ok = np.abs(den) > 1e-12
+
+    s = np.linspace(0.0, length, max(8, int(samples)))
+    q = a[None, :] + s[:, None] * u[None, :]
+    qp = p0[None, :, :] - q[:, None, :]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        # r -- parameter along the polygon edge, t -- coordinate along n.
+        r = (qp[..., 0] * n[1] - qp[..., 1] * n[0]) / den[None, :]
+        t = (qp[..., 0] * d[None, :, 1] - qp[..., 1] * d[None, :, 0]) / den[None, :]
+
+    ok = edge_ok[None, :] & (r >= 0.0) & (r < 1.0) & np.isfinite(t)
+    ts = np.where(ok, t, np.inf)
+    ts.sort(axis=1)
+
+    # A scanline through a polygon vertex produces two coincident intersections.
+    # Merge them, otherwise the even-odd pairing of the intervals breaks.
+    keep = np.isfinite(ts)
+    with np.errstate(invalid="ignore"):
+        delta = np.diff(ts, axis=1)
+    keep[:, 1:] &= np.isfinite(delta) & (delta > (_WIDTH_MERGE_EPS * max(length, 1.0)))
+
+    # Pack kept values to the left, preserving ascending order. Then the kept
+    # intersections of every row occupy columns 0..count-1 and the inside
+    # intervals are (0,1), (2,3), ... pairs.
+    order = np.argsort(~keep, axis=1, kind="stable")
+    tk = np.take_along_axis(ts, order, axis=1)
+    counts = keep.sum(axis=1)
+
+    cols = ts.shape[1]
+    even_cols = np.arange(0, cols - 1, 2)
+    odd_cols = even_cols + 1
+    starts = tk[:, even_cols]
+    ends = tk[:, odd_cols]
+    pair_ok = odd_cols[None, :] < counts[:, None]
+    with np.errstate(invalid="ignore"):
+        pair_widths = ends - starts
+    pair_widths = np.where(pair_ok & np.isfinite(pair_widths), pair_widths, -1.0)
+    row_widths = pair_widths.max(axis=1)
+
+    best_row = int(np.argmax(row_widths))
+    if row_widths[best_row] <= 0:
+        return None
+    best_col = int(np.argmax(pair_widths[best_row]))
+    width = float(pair_widths[best_row, best_col])
+    if width <= 0:
+        return None
+
+    t0 = float(starts[best_row, best_col])
+    t1 = float(ends[best_row, best_col])
+    pmin = a + s[best_row] * u + t0 * n
+    pmax = a + s[best_row] * u + t1 * n
+
+    profile = np.where(row_widths > 0, row_widths, 0.0)
+    x = s / length
+    return (
+        width,
+        ((float(pmin[0]), float(pmin[1])), (float(pmax[0]), float(pmax[1]))),
+        profile,
+        x,
+        float(s[best_row] / length),
+    )
+
+
+# --- Классификация формы -----------------------------------------------------
+# Литература по морфологии зерновки ячменя:
+#   * основные ботанические формы — ромбическая, эллиптическая, удлинённая
+#     (activestudy.info «Строение и свойства зерновки ячменя»);
+#   * у удлинённой формы наиболее широкая часть находится несколько выше
+#     середины, а сужение кверху резче, чем книзу (БГСХА, «Сортовые признаки
+#     ячменя»);
+#   * зерновка эллиптическая, с продольной неглубокой бороздкой, заострена с
+#     обеих сторон (activestudy.info «Ботаническая характеристика ячменя»).
+# Прикладные классы «грушевидная / цилиндрическая / игольчатая» не являются
+# стандартными ботаническими терминами. Они сопоставлены с профилем ширины
+# вдоль длинной оси: грушевидная — асимметричный профиль с более широкой
+# частью ближе к одному концу; цилиндрическая — симметричный профиль с
+# выровненной серединой; игольчатая — удлинённое зерно с узким профилем и
+# заострёнными концами. Шаблоны ниже заданы в тех же единицах, что и
+# нормированный профиль ширины (максимум = 1).
+SHAPE_PEAR = "грушевидная"
+SHAPE_CYLINDRICAL = "цилиндрическая"
+SHAPE_NEEDLE = "игольчатая"
+SHAPE_OPTIONS: tuple[str, ...] = (SHAPE_PEAR, SHAPE_CYLINDRICAL, SHAPE_NEEDLE)
+
+_SHAPE_PROFILE_POINTS = 64
+_SHAPE_GRID = np.linspace(0.04, 0.96, _SHAPE_PROFILE_POINTS)
+_SHAPE_ANCHOR_X = np.array([
+    0.06, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50,
+    0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.94,
+])
+
+_SHAPE_TEMPLATE_ANCHORS: dict[str, np.ndarray] = {
+    # Симметричный, с выровненной серединой и округлыми концами.
+    SHAPE_CYLINDRICAL: np.array([
+        0.421, 0.509, 0.617, 0.697, 0.775, 0.866, 0.966, 0.993,
+        0.966, 0.866, 0.775, 0.697, 0.617, 0.509, 0.421,
+    ]),
+    # Асимметричный: максимум смещён влево, к правому концу сужение резче.
+    SHAPE_PEAR: np.array([
+        0.515, 0.640, 0.771, 0.844, 0.904, 0.965, 0.995, 0.954,
+        0.853, 0.694, 0.590, 0.514, 0.447, 0.376, 0.329,
+    ]),
+    # Удлинённый, постепенно сужающийся к обоим концам.
+    SHAPE_NEEDLE: np.array([
+        0.397, 0.480, 0.587, 0.668, 0.748, 0.844, 0.957, 0.992,
+        0.957, 0.844, 0.748, 0.668, 0.587, 0.480, 0.397,
+    ]),
+}
+
+_SHAPE_TEMPLATES: dict[str, np.ndarray] = {
+    name: np.interp(_SHAPE_GRID, _SHAPE_ANCHOR_X, anchors)
+    for name, anchors in _SHAPE_TEMPLATE_ANCHORS.items()
+}
+
+# Пороги и веса подобраны на предоставленном наборе из 2600 контуров:
+# у 90% зёрен вытянутость L/W < 2.40, у 90% асимметрия профиля < 1.36.
+_NEEDLE_ASPECT_MIN = 2.40
+_NEEDLE_FLAT_MAX = 0.82
+_NEEDLE_ASPECT_WEIGHT = 0.25
+_NEEDLE_FLAT_WEIGHT = 0.15
+_PEAR_ASYM_MIN = 1.36
+_PEAR_ASYM_WEIGHT = 0.20
+
+
+def _normalized_shape_profile(profile: np.ndarray, x: np.ndarray) -> np.ndarray | None:
+    """Resample, smooth and normalise a width profile to a unit maximum."""
+    profile = np.asarray(profile, dtype=np.float64)
+    x = np.asarray(x, dtype=np.float64)
+    if profile.size < 3 or x.size != profile.size:
+        return None
+    p = np.interp(_SHAPE_GRID, x, profile)
+    p = np.maximum(p, 0.0)
+    peak = float(p.max())
+    if peak <= 1e-9:
+        return None
+    p /= peak
+    # Лёгкое сглаживание: на вогнутом контуре профиль может «дрожать».
+    if p.size >= 5:
+        kernel = np.ones(5, dtype=np.float64) / 5.0
+        p = np.convolve(np.pad(p, (2, 2), mode="edge"), kernel, mode="valid")
+        p /= max(float(p.max()), 1e-9)
+    return p
+
+
+def classify_seed_shape(profile: np.ndarray, x: np.ndarray, aspect: float) -> str:
+    """Choose the best of the three practical barley-grain shape templates.
+
+    The contour's width profile is compared with each template by mean absolute
+    distance.  Aspect-ratio and asymmetry priors resolve cases where the profiles
+    are close: a needle-shaped grain must be elongated, a pear-shaped one must be
+    noticeably asymmetric.
+    """
+    p = _normalized_shape_profile(profile, x)
+    if p is None:
+        return SHAPE_CYLINDRICAL
+
+    left = float(p[_SHAPE_GRID < 0.35].mean())
+    right = float(p[_SHAPE_GRID > 0.65].mean())
+    asymmetry = max(left, right) / max(min(left, right), 1e-9)
+    flat = float(np.mean(p[(_SHAPE_GRID > 0.25) & (_SHAPE_GRID < 0.75)] >= 0.85))
+
+    def distance(template: np.ndarray) -> float:
+        return float(np.mean(np.abs(p - template)))
+
+    d_cyl = distance(_SHAPE_TEMPLATES[SHAPE_CYLINDRICAL])
+    d_needle = distance(_SHAPE_TEMPLATES[SHAPE_NEEDLE])
+    # The pear template is asymmetric; the grain can be oriented either way.
+    pear = _SHAPE_TEMPLATES[SHAPE_PEAR]
+    d_pear = min(distance(pear), distance(pear[::-1]))
+
+    scores = {
+        SHAPE_CYLINDRICAL: d_cyl,
+        SHAPE_PEAR: d_pear + _PEAR_ASYM_WEIGHT * max(0.0, _PEAR_ASYM_MIN - asymmetry),
+        SHAPE_NEEDLE: (
+            d_needle
+            + _NEEDLE_ASPECT_WEIGHT * max(0.0, _NEEDLE_ASPECT_MIN - float(aspect))
+            + _NEEDLE_FLAT_WEIGHT * max(0.0, flat - _NEEDLE_FLAT_MAX)
+        ),
+    }
+    return min(scores, key=scores.get)
+
+
+def measure_contour_geometry(contour: np.ndarray | None) -> dict[str, Any]:
+    """Measure the seed from its contour alone (no image needed).
+
+    Returns ``length_px``, ``angle_deg``, ``length_endpoints``, ``width_px``,
+    ``width_endpoints``, ``width_position`` and ``shape``.  Missing keys mean
+    that the contour was degenerate.
+    """
+    if contour is None:
+        return {}
+    pts = simplify_contour(np.asarray(contour).reshape(-1, 2))
+    if len(pts) < 3:
+        return {}
+    chord = _longest_internal_chord(pts)
+    if chord is None:
+        return {}
+    a, b, length = chord
+    angle = float(math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))) % 180.0
+    result: dict[str, Any] = {
+        "length_px": round(float(length), 3),
+        "angle_deg": round(angle, 3),
+        "length_endpoints": (
+            (float(a[0]), float(a[1])),
+            (float(b[0]), float(b[1])),
+        ),
+    }
+    width_result = maximum_internal_width(pts, a, b)
+    if width_result is not None:
+        width, endpoints, profile, x, position = width_result
+        result.update({
+            "width_px": round(float(width), 3),
+            "width_endpoints": endpoints,
+            "width_position": round(float(position), 4),
+            "shape": classify_seed_shape(profile, x, length / max(width, 1e-9)),
+        })
+    return result
 
 
 def compute_median_rgb(
@@ -362,13 +637,10 @@ def compute_seed_metrics(
     angle_hint: float | None = None,
     groove_threshold: float = GROOVE_SCORE_THRESHOLD,
 ) -> dict[str, Any]:
-    result: dict[str, Any] = {"rgb_averaged": None, "color_hex": "", "groove": None, "groove_score": None}
-    axis = length_axis(contour)
-    if axis is not None:
-        length_px, angle_deg, dist = axis
-        result["length_px"] = round(length_px, 3)
-        result["angle_deg"] = round(angle_deg, 3)
-        result["length_endpoints"] = dist
+    result: dict[str, Any] = {
+        "rgb_averaged": None, "color_hex": "", "groove": None, "groove_score": None,
+    }
+    result.update(measure_contour_geometry(contour))
     rgb = rgb_averaged(image_bgr, contour)
     if rgb is not None:
         result["rgb_averaged"] = f"{rgb[0]:.1f};{rgb[1]:.1f};{rgb[2]:.1f}"
