@@ -377,8 +377,33 @@ def classify_seed_shape(profile: np.ndarray, x: np.ndarray, aspect: float) -> st
     return min(scores, key=scores.get)
 
 
+def _aligned_endpoints(
+    a1: tuple[float, float], b1: tuple[float, float],
+    a2: tuple[float, float], b2: tuple[float, float],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Average two chords after giving their endpoints a consistent order."""
+    p1 = np.asarray(a1, dtype=np.float64)
+    q1 = np.asarray(b1, dtype=np.float64)
+    p2 = np.asarray(a2, dtype=np.float64)
+    q2 = np.asarray(b2, dtype=np.float64)
+    if float(np.dot(q1 - p1, q2 - p2)) < 0.0:
+        p2, q2 = q2, p2
+    return (p1 + p2) / 2.0, (q1 + q2) / 2.0
+
+
 def measure_contour_geometry(contour: np.ndarray | None) -> dict[str, Any]:
     """Measure the seed from its contour alone (no image needed).
+
+    The measurement is a perpendicular cross built from two bases:
+
+    1. the longest internal chord gives the length base; the maximum chord
+       perpendicular to it gives the width base;
+    2. the width base in turn gives a second length base (perpendicular to it),
+       and that second length base gives a second width base.
+
+    The final length and width endpoints are the averages of the corresponding
+    endpoints of both bases.  Since the two length bases are parallel and the
+    two width bases are parallel, the averaged segments stay perpendicular.
 
     Returns ``length_px``, ``angle_deg``, ``length_endpoints``, ``width_px``,
     ``width_endpoints``, ``width_position`` and ``shape``.  Missing keys mean
@@ -389,29 +414,74 @@ def measure_contour_geometry(contour: np.ndarray | None) -> dict[str, Any]:
     pts = simplify_contour(np.asarray(contour).reshape(-1, 2))
     if len(pts) < 3:
         return {}
+    # Measure in a local frame.  The contour JSON keeps crop-local coordinates
+    # while the segmentation pipeline measures source-image coordinates; the
+    # shift between them must not change any result (including shape, which can
+    # flip when a contour lies exactly on a template boundary).
+    origin = pts[0].copy()
+    pts = pts - origin
     chord = _longest_internal_chord(pts)
     if chord is None:
         return {}
-    a, b, length = chord
-    angle = float(math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))) % 180.0
-    result: dict[str, Any] = {
-        "length_px": round(float(length), 3),
+    a1, b1, length1 = chord
+
+    width_base = maximum_internal_width(pts, a1, b1)
+    if width_base is None:
+        angle = float(math.degrees(math.atan2(b1[1] - a1[1], b1[0] - a1[0]))) % 180.0
+        return {
+            "length_px": round(float(length1), 3),
+            "angle_deg": round(angle, 3),
+            "length_endpoints": (
+                (float(a1[0] + origin[0]), float(a1[1] + origin[1])),
+                (float(b1[0] + origin[0]), float(b1[1] + origin[1])),
+            ),
+        }
+
+    width1, (c1, d1), profile, x, position = width_base
+    a_final, b_final = np.asarray(a1, dtype=np.float64), np.asarray(b1, dtype=np.float64)
+    c_final, d_final = np.asarray(c1, dtype=np.float64), np.asarray(d1, dtype=np.float64)
+    length_final = float(length1)
+    width_final = float(width1)
+
+    # Second base: longest chord perpendicular to the width base.  It is
+    # parallel to the first length chord, but sampled independently.
+    length_base2 = maximum_internal_width(pts, c1, d1)
+    if length_base2 is not None:
+        length2, (a2, b2), _, _, _ = length_base2
+        width_base2 = maximum_internal_width(pts, a2, b2)
+        if width_base2 is not None:
+            width2, (c2, d2), _, _, _ = width_base2
+            a_final, b_final = _aligned_endpoints(a1, b1, a2, b2)
+            c_final, d_final = _aligned_endpoints(c1, d1, c2, d2)
+            length_final = float(np.linalg.norm(b_final - a_final))
+            width_final = float(np.linalg.norm(d_final - c_final))
+
+    if length_final <= 1e-9 or width_final <= 1e-9:
+        return {}
+
+    # Shape is classified from the width profile across the final length axis.
+    profile_result = maximum_internal_width(pts, a_final, b_final)
+    if profile_result is not None:
+        _, _, profile, x, position = profile_result
+    shape = classify_seed_shape(profile, x, length_final / max(width_final, 1e-9))
+    angle = float(math.degrees(math.atan2(
+        float(b_final[1] - a_final[1]), float(b_final[0] - a_final[0])
+    ))) % 180.0
+    return {
+        "length_px": round(length_final, 3),
         "angle_deg": round(angle, 3),
         "length_endpoints": (
-            (float(a[0]), float(a[1])),
-            (float(b[0]), float(b[1])),
+            (float(a_final[0] + origin[0]), float(a_final[1] + origin[1])),
+            (float(b_final[0] + origin[0]), float(b_final[1] + origin[1])),
         ),
+        "width_px": round(width_final, 3),
+        "width_endpoints": (
+            (float(c_final[0] + origin[0]), float(c_final[1] + origin[1])),
+            (float(d_final[0] + origin[0]), float(d_final[1] + origin[1])),
+        ),
+        "width_position": round(float(position), 4),
+        "shape": shape,
     }
-    width_result = maximum_internal_width(pts, a, b)
-    if width_result is not None:
-        width, endpoints, profile, x, position = width_result
-        result.update({
-            "width_px": round(float(width), 3),
-            "width_endpoints": endpoints,
-            "width_position": round(float(position), 4),
-            "shape": classify_seed_shape(profile, x, length / max(width, 1e-9)),
-        })
-    return result
 
 
 def compute_median_rgb(

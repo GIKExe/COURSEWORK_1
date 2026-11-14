@@ -12,6 +12,7 @@ from PIL import Image
 from core.csv_utils import read_csv_robust
 from core.io_utils import parse_float
 from core.models import is_augmentation
+from core.seed_geometry import measure_contour_geometry
 from gui.common.file_scan import scan_directory
 from gui.common.ruler import draw_canvas_ruler
 from gui.common.widgets import (
@@ -50,6 +51,7 @@ class AugInspectionApp:
         self.image_files: dict[str, str] = {}
         self.json_files: dict[str, str] = {}
         self.current_contour_pts: list[tuple[float, float]] = []
+        self.current_geometry: dict[str, Any] = {}
         self.current_json_meta: dict[str, Any] = {}
         # Monotonic counter used to discard image decodes that finish after
         # the user already switched to another seed (async loading guard).
@@ -201,10 +203,12 @@ class AugInspectionApp:
         self.show_contour_var = tk.BooleanVar(value=True)
         self.show_points_var = tk.BooleanVar(value=False)
         self.show_axis_var = tk.BooleanVar(value=True)
+        self.show_width_var = tk.BooleanVar(value=True)
         self.show_ruler_var = tk.BooleanVar(value=True)
         self.contour_color_name = tk.StringVar(value="Зелёный")
         for text, var in [("Показывать контур", self.show_contour_var), ("Точки контура", self.show_points_var),
-                          ("Ось угла", self.show_axis_var), ("Мм линейка", self.show_ruler_var)]:
+                          ("Ось угла", self.show_axis_var), ("Отрезок ширины", self.show_width_var),
+                          ("Мм линейка", self.show_ruler_var)]:
             ttk.Checkbutton(vis_group, text=text, variable=var, command=self._redraw).pack(anchor="w", pady=2)
         color_row = ttk.Frame(vis_group)
         color_row.pack(fill=tk.X, pady=4)
@@ -324,6 +328,7 @@ class AugInspectionApp:
         self.aug_split_lbl.config(text=f"Split: {split.upper()}")
 
         self.current_contour_pts = []
+        self.current_geometry = {}
         self.current_json_meta = {}
         # scan_directory keys both dicts by file name *without extension*:
         # the contour JSON for "1_2.jpg" is stored under "1_2_contour".
@@ -335,6 +340,13 @@ class AugInspectionApp:
                 pts = self.current_json_meta.get("points", [])
                 if pts:
                     self.current_contour_pts = [(float(p[0]), float(p[1])) for p in pts]
+                    if len(self.current_contour_pts) >= 3:
+                        try:
+                            self.current_geometry = measure_contour_geometry(
+                                self.current_contour_pts
+                            )
+                        except Exception:
+                            self.current_geometry = {}
             except Exception:
                 pass
 
@@ -426,6 +438,22 @@ class AugInspectionApp:
                 cr = 4
                 canvas.create_oval(cx - cr, cy - cr, cx + cr, cy + cr,
                                    fill="#00FFFF", outline="", tags=("overlay",))
+
+        # Отрезок ширины — усреднённая перпендикулярная хорда из
+        # measure_contour_geometry().  Точки пересчитываются из контура,
+        # поэтому отрезок остаётся корректным и для аугментированных копий.
+        if self.show_width_var.get():
+            ends = self.current_geometry.get("width_endpoints")
+            if ends and len(ends) == 2:
+                (wx1, wy1), (wx2, wy2) = ends
+                x1, y1 = wx1 * scale, wy1 * scale
+                x2, y2 = wx2 * scale, wy2 * scale
+                canvas.create_line(x1, y1, x2, y2, fill="#000000", width=5, tags=("overlay",))
+                canvas.create_line(x1, y1, x2, y2, fill="#FF00FF", width=2, tags=("overlay",))
+                r = 4
+                for px, py in ((x1, y1), (x2, y2)):
+                    canvas.create_oval(px - r, py - r, px + r, py + r,
+                                       fill="#FF00FF", outline="#FFFFFF", tags=("overlay",))
 
         # Отрисовка миллиметровой линейки
         if self.show_ruler_var.get():
